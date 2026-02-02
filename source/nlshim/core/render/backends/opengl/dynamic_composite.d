@@ -136,7 +136,7 @@ void oglBeginDynamicComposite(DynamicCompositePass pass) {
 
     glDrawBuffers(cast(int)bufferCount, drawBuffers.ptr);
     glViewport(0, 0, tex.width, tex.height);
-    glClearColor(0, 0, 0, 0.1);
+    glClearColor(0, 0, 0, 0);
     glClear(GL_COLOR_BUFFER_BIT);
     glActiveTexture(GL_TEXTURE0);
     glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
