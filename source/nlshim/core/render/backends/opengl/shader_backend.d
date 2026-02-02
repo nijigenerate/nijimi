@@ -1,6 +1,6 @@
 module nlshim.core.render.backends.opengl.shader_backend;
 
-import nlshim.math : mat4, vec2, vec3, vec4;
+import nlshim.core.render.support : mat4, vec2, vec3, vec4;
 
 version (InDoesRender) {
 

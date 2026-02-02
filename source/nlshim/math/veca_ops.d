@@ -115,7 +115,7 @@ private void rotateAxesSimd(
     }
 }
 
-public void projectVec2OntoAxes(
+package(nlshim) void projectVec2OntoAxes(
     const Vec2Array center,
     const Vec2Array reference,
     const Vec2Array axisA,
@@ -150,7 +150,7 @@ public void projectVec2OntoAxes(
         axisBY);
 }
 
-public void composeVec2FromAxes(
+package(nlshim) void composeVec2FromAxes(
     ref Vec2Array dest,
     const Vec2Array base,
     const float[] axisA,
@@ -179,7 +179,7 @@ public void composeVec2FromAxes(
     simdBlendAxes(dstY, baseY, axisA[0 .. len], dirAY, axisB[0 .. len], dirBY);
 }
 
-public void rotateVec2TangentsToNormals(
+package(nlshim) void rotateVec2TangentsToNormals(
     ref Vec2Array normals,
     const Vec2Array tangents) {
     auto len = tangents.length;

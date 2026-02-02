@@ -1,7 +1,6 @@
 module nlshim.core.diff_collect;
 
-import nlshim.core.render.backends : RenderBackend, RenderResourceHandle;
-import nlshim.core.runtime_state : tryRenderBackend;
+import nlshim.core.render.backends : RenderResourceHandle;
 
 struct DifferenceEvaluationRegion {
     int x;
@@ -10,63 +9,25 @@ struct DifferenceEvaluationRegion {
     int height;
 }
 
-enum TileColumns = 16;
-enum TileCount = TileColumns * TileColumns;
-
 struct DifferenceEvaluationResult {
     double red;
     double green;
     double blue;
     double alpha;
-    uint sampleCount;
-    double[TileCount] tileTotals;
-    double[TileCount] tileCounts;
-
-    @property double total() const {
-        return red + green + blue;
-    }
+    double[16] tileRed;
+    double[16] tileGreen;
+    double[16] tileBlue;
+    double[16] tileAlpha;
 }
 
-private RenderBackend backendOrNull() {
-    return tryRenderBackend();
-}
+// placeholders for queue/dx backends; OpenGL implementation lives in diff_collect_impl
 
-void rpSetDifferenceEvaluationEnabled(bool enabled) {
-    auto backend = backendOrNull();
-    if (backend !is null) {
-        backend.setDifferenceAggregationEnabled(enabled);
-    }
-}
+private __gshared bool gEnabled;
+private __gshared DifferenceEvaluationRegion gRegion;
 
-bool rpDifferenceEvaluationEnabled() {
-    auto backend = backendOrNull();
-    return backend is null ? false : backend.isDifferenceAggregationEnabled();
-}
-
-void rpSetDifferenceEvaluationRegion(DifferenceEvaluationRegion region) {
-    auto backend = backendOrNull();
-    if (backend !is null) {
-        backend.setDifferenceAggregationRegion(region);
-    }
-}
-
-DifferenceEvaluationRegion rpGetDifferenceEvaluationRegion() {
-    auto backend = backendOrNull();
-    return backend is null ? DifferenceEvaluationRegion.init
-                           : backend.getDifferenceAggregationRegion();
-}
-
-bool rpEvaluateDifference(RenderResourceHandle sourceTexture, int viewportWidth, int viewportHeight) {
-    auto backend = backendOrNull();
-    if (backend is null) return false;
-    return backend.evaluateDifferenceAggregation(sourceTexture, viewportWidth, viewportHeight);
-}
-
-bool rpFetchDifferenceResult(out DifferenceEvaluationResult result) {
-    auto backend = backendOrNull();
-    if (backend is null) {
-        result = DifferenceEvaluationResult.init;
-        return false;
-    }
-    return backend.fetchDifferenceAggregationResult(result);
-}
+void rpSetDifferenceEvaluationEnabled(bool enabled) { gEnabled = enabled; }
+bool rpDifferenceEvaluationEnabled() { return gEnabled; }
+void rpSetDifferenceEvaluationRegion(DifferenceEvaluationRegion region) { gRegion = region; }
+DifferenceEvaluationRegion rpGetDifferenceEvaluationRegion() { return gRegion; }
+bool rpEvaluateDifference(RenderResourceHandle, int width, int height) { return false; }
+bool rpFetchDifferenceResult(out DifferenceEvaluationResult result) { result = DifferenceEvaluationResult.init; return false; }

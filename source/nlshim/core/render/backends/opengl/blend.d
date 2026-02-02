@@ -1,13 +1,13 @@
 ﻿module nlshim.core.render.backends.opengl.blend;
 
-import nlshim.core.nodes.common : BlendMode;
+import nlshim.core.render.support : BlendMode;
 
 version (InDoesRender) {
 
 import bindbc.opengl;
 import bindbc.opengl.context;
 import nlshim.core.shader : Shader, shaderAsset;
-import nlshim.math : mat4, vec2;
+import nlshim.core.render.support : mat4, vec2;
 
 private __gshared Shader[BlendMode] blendShaders;
 
@@ -176,7 +176,7 @@ bool oglSupportsAdvancedBlendCoherent() {
 
 } else {
 
-import nlshim.core.nodes.common : BlendMode;
+import nlshim.core.render.support : BlendMode;
 import nlshim.core.shader : Shader;
 alias GLuint = uint;
 

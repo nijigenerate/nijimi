@@ -5,7 +5,7 @@ import std.algorithm.comparison : max;
 import std.algorithm.mutation : swap;
 import core.stdc.string : memcpy;
 
-import nlshim.math;
+import nlshim.core.render.support;
 import nlshim.core.shader : Shader, shaderAsset, ShaderAsset;
 import nlshim.core.dbg : inInitDebug;
 import nlshim.core.render.backends.opengl.part : boundAlbedo;

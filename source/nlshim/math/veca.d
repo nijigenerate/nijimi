@@ -12,7 +12,7 @@ enum simdAlignment = 16;
 struct veca(T, size_t N)
 if (N > 0) {
     alias Element = Vector!(T, N);
-    public T[][N] lanes;
+package(nlshim) T[][N] lanes;
 private:
     T[] backing;
     size_t logicalLength;
@@ -321,13 +321,13 @@ public:
         return lanes[component];
     }
 
-    public inout(T)[] rawStorage() inout {
+package(nlshim) inout(T)[] rawStorage() inout {
         assert(laneBase == 0 && (laneStride == logicalLength || laneStride == 0),
                "rawStorage is only available for owned contiguous buffers");
         return backing;
     }
 
-    public void bindExternalStorage(ref veca storage, size_t offset, size_t length) {
+package(nlshim) void bindExternalStorage(ref veca storage, size_t offset, size_t length) {
         if (length == 0 || storage.backing.length == 0) {
             ownsStorage = false;
             backing = null;

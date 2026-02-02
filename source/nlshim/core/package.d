@@ -13,17 +13,11 @@ module nlshim.core;
 public import nlshim.core.shader;
 public import nlshim.core.texture;
 public import nlshim.core.resource;
-public import nlshim.core.nodes;
-public import nlshim.core.nodes.common : BlendMode;
-public import nlshim.core.puppet;
-public import nlshim.core.meshdata;
-public import nlshim.core.param;
-public import nlshim.core.automation;
-public import nlshim.core.animation;
+public import nlshim.core.render.support : BlendMode;
 public import nlshim.core.diff_collect : DifferenceEvaluationRegion, DifferenceEvaluationResult;
 public import nlshim.core.texture_types;
 public import nlshim.core.runtime_state;
-public import nlshim.integration;
+public import nlshim.math;
 version(InDoesRender) {
     version(UseQueueBackend) {
     } else {

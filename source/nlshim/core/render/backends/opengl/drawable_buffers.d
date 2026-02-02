@@ -1,6 +1,6 @@
 module nlshim.core.render.backends.opengl.drawable_buffers;
 
-import nlshim.math : vec2, Vec2Array;
+import nlshim.core.render.support : vec2, Vec2Array;
 import nlshim.core.render.backends : RenderResourceHandle;
 
 version (unittest) {

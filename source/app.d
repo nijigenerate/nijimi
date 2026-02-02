@@ -19,7 +19,7 @@ import opengl.opengl_backend : NjgResult, UnityRendererConfig, UnityResourceCall
 import opengl.opengl_backend : initOpenGLBackend, OpenGLBackendInit;
 import nlshim.core.render.backends.opengl.runtime : oglResizeViewport;
 import core.runtime : Runtime;
-import nlshim.core.nodes.drawable : inSetUpdateBounds;
+import nlshim.core.render.support : inSetUpdateBounds;
 import nlshim.core.runtime_state : inSetViewport;
 enum MaskDrawableKind : uint { Part, Mask }
 

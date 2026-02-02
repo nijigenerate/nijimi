@@ -1,6 +1,6 @@
 module nlshim.core.dbg;
 
-import nlshim.math : vec3, vec4, mat4, Vec3Array;
+import nlshim.core.render.support : vec3, vec4, mat4, Vec3Array;
 import nlshim.core.render.backends : RenderBackend, RenderResourceHandle;
 import nlshim.core.runtime_state : inGetCamera, tryRenderBackend;
 

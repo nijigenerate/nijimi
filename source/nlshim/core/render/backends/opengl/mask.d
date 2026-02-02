@@ -5,7 +5,7 @@ import nlshim.core.render.commands : MaskApplyPacket, MaskDrawPacket, MaskDrawab
 version (InDoesRender) {
 
 import bindbc.opengl;
-import nlshim.core.nodes.drawable : incDrawableBindVAO;
+import nlshim.core.render.support : incDrawableBindVAO;
 import nlshim.core.render.backends.opengl.part : oglExecutePartPacket;
 import nlshim.core.shader : Shader, shaderAsset, ShaderAsset;
 import nlshim.core.render.backends.opengl.buffer_sync : markBufferInUse;

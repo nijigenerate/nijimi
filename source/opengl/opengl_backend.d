@@ -8,8 +8,8 @@ import std.stdio : File, writeln, stdout;
 
 import bindbc.sdl;
 import bindbc.opengl;
-import nlshim.core.nodes.common : BlendMode;
-import nlshim.math : vec2, vec3, mat4;
+import nlshim.core.render.support : BlendMode;
+import nlshim.core.render.support : vec2, vec3, mat4;
 import nlshim.core.render.backends.opengl.handles : GLTextureHandle;
 import nlshim.core.render.backends : RenderResourceHandle, RenderTextureHandle, BackendEnum, RenderBackend;
 import nlshim.core.render.backends.opengl.composite : oglDrawCompositeQuad;
@@ -154,7 +154,7 @@ struct vec3 { float x; float y; float z; }
 struct vec4 { float x; float y; float z; float w; }
 
 import nlshim.core.texture : Texture;
-import nlshim.math : veca, Vec2Array;
+import nlshim.core.render.support : Vec2Array;
 import nlshim.core.render.backends.opengl.handles : GLTextureHandle;
 import nlshim.core.render.backends.opengl.runtime : oglInitRenderer, oglResizeViewport, oglBeginScene, oglEndScene, oglPostProcessScene, oglGetFramebuffer, oglRebindActiveTargets;
 import nlshim.core.render.backends.opengl.drawable_buffers :
@@ -179,7 +179,7 @@ import nlshim.core.render.backends.opengl.mask :
 import nlshim.core.render.backends.opengl.dynamic_composite :
     oglBeginDynamicComposite,
     oglEndDynamicComposite;
-import nlshim.core.nodes.drawable : incDrawableBindVAO;
+import nlshim.core.render.support : incDrawableBindVAO;
 import NlCmds = nlshim.core.render.commands;
 alias PartDrawPacket = NlCmds.PartDrawPacket;
 alias MaskDrawPacket = NlCmds.MaskDrawPacket;
@@ -188,7 +188,7 @@ alias DynamicCompositePass = NlCmds.DynamicCompositePass;
 alias DynamicCompositeSurface = NlCmds.DynamicCompositeSurface;
 alias NlMaskKind = NlCmds.MaskDrawableKind;
 import nlshim.core.runtime_state : inSetRenderBackend, inSetViewport;
-import nlshim.math : mat4;
+import nlshim.core.render.support : mat4;
 import nlshim.core.render.backends.opengl.part : partShader, gopacity, gMultColor, gScreenColor, mvp, offset;
 
 __gshared Texture[size_t] gTextures; // Unity handle -> nlshim Texture

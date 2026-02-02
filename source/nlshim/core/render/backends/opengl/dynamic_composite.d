@@ -6,7 +6,7 @@ import bindbc.opengl;
 import nlshim.core.render.commands : DynamicCompositePass, DynamicCompositeSurface;
 import nlshim.core.runtime_state : inPushViewport, inPopViewport, inGetCamera, inSetCamera;
 import nlshim.core.render.backends.opengl.runtime : oglRebindActiveTargets;
-import nlshim.math : mat4, vec2, vec3, vec4;
+import nlshim.core.render.support : mat4, vec2, vec3, vec4;
 import nlshim.core.texture : Texture;
 import nlshim.core.render.backends.opengl.handles : requireGLTexture;
 import nlshim.core.render.backends : RenderResourceHandle;

@@ -5,10 +5,10 @@ import nlshim.core.render.commands : CompositeDrawPacket;
 version (InDoesRender) {
 
 import bindbc.opengl;
-import nlshim.core.nodes.common : inSetBlendMode;
+import nlshim.core.render.support : inSetBlendMode;
 import nlshim.core.render.backends.opengl.runtime : oglPrepareCompositeScene;
 import nlshim.core.shader : Shader, shaderAsset, ShaderAsset;
-import nlshim.math : mat4;
+import nlshim.core.render.support : mat4;
 
 private __gshared Shader compositeShader;
 private __gshared Shader compositeMaskShader;

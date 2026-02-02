@@ -10,12 +10,11 @@ module nlshim.core.texture;
 version (UseQueueBackend) {
     extern(C) __gshared void function(size_t handle) ngReleaseExternalHandle; // module-level hook for Unity external texture release
 }
-import nlshim.math;
+import nlshim.core.render.support;
 import std.exception;
 import std.format;
 import imagefmt;
 import std.algorithm : clamp;
-import nlshim.core.nodes : inCreateUUID;
 import nlshim.core.texture_types : Filtering, Wrapping;
 import nlshim.core.render.backends : RenderTextureHandle;
 version (InDoesRender) {
@@ -196,7 +195,7 @@ public:
 
         // Load in image data to OpenGL
         this(image.buf8, image.w, image.h, image.c, channels == 0 ? image.c : channels, false, useMipmaps);
-        uuid = inCreateUUID();
+        uuid = 0;
     }
 
     /**
@@ -237,7 +236,7 @@ public:
             this.setWrapping(Wrapping.Clamp);
             this.setAnisotropy(incGetMaxAnisotropy()/2.0f);
         }
-        uuid = inCreateUUID();
+        uuid = 0;
     }
 
     ~this() {

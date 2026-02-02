@@ -5,8 +5,9 @@ version (InDoesRender) {
 import nlshim.core.render.backends;
 import nlshim.core.render.commands : PartDrawPacket, MaskApplyPacket,
     MaskDrawPacket, DynamicCompositePass, DynamicCompositeSurface;
-import nlshim.core.nodes.part : Part;
-import nlshim.core.nodes.common : BlendMode;
+
+import nlshim.core.render.support : BlendMode;
+// queue/backend not used in this binary; avoid pulling queue modules
 import nlshim.core.render.backends.opengl.runtime :
     oglInitRenderer,
     oglResizeViewport,
@@ -34,18 +35,11 @@ import nlshim.core.render.backends.opengl.debug_renderer :
     oglSetDebugExternalBuffer,
     oglDrawDebugPoints,
     oglDrawDebugLines;
-import nlshim.core.render.backends.opengl.diff_collect_impl :
-    oglSetDifferenceAggregationEnabled,
-    oglIsDifferenceAggregationEnabled,
-    oglSetDifferenceAggregationRegion,
-    oglGetDifferenceAggregationRegion,
-    oglEvaluateDifferenceAggregation,
-    oglFetchDifferenceAggregationResult;
-import nlshim.math : vec2, vec3, vec4, rect, mat4, Vec2Array, Vec3Array;
+import nlshim.core.render.support : vec2, vec3, vec4, mat4, Vec2Array, Vec3Array;
+import inmath.linalg : rect;
 import nlshim.core.texture : Texture;
 import nlshim.core.shader : Shader;
 import nlshim.math.camera : Camera;
-import nlshim.core.diff_collect : DifferenceEvaluationRegion, DifferenceEvaluationResult;
 import nlshim.core.render.backends.opengl.part :
     oglDrawPartPacket,
     oglInitPartBackendResources;
@@ -78,8 +72,6 @@ import nlshim.core.render.backends.opengl.blend :
     oglSupportsAdvancedBlendCoherent,
     oglGetBlendShader,
     oglBlendToBuffer;
-import nlshim.core.render.backends.opengl.draw_texture :
-    oglDrawTextureAtPart, oglDrawTextureAtPosition, oglDrawTextureAtRect;
 import nlshim.core.render.backends.opengl.composite : oglDrawCompositeQuad;
 import nlshim.core.texture_types : Filtering, Wrapping;
 import nlshim.core.render.profiler : profileScope, renderProfilerFrameCompleted;
@@ -270,20 +262,7 @@ class RenderingBackend(BackendEnum backendType : BackendEnum.OpenGL) {
         oglEndMask();
     }
 
-    void drawTextureAtPart(Texture texture, Part part) {
-        oglDrawTextureAtPart(texture, part);
-    }
-
-    void drawTextureAtPosition(Texture texture, vec2 position, float opacity,
-                                        vec3 color, vec3 screenColor) {
-        oglDrawTextureAtPosition(texture, position, opacity, color, screenColor);
-    }
-
-    void drawTextureAtRect(Texture texture, rect area, rect uvs,
-                                    float opacity, vec3 color, vec3 screenColor,
-                                    Shader shader = null, Camera cam = null) {
-        oglDrawTextureAtRect(texture, area, uvs, opacity, color, screenColor, shader, cam);
-    }
+    // drawTexture* helpers removed; viewer uses packet-driven path only.
 
     RenderResourceHandle framebufferHandle() {
         return cast(RenderResourceHandle)oglGetFramebuffer();
@@ -323,30 +302,6 @@ class RenderingBackend(BackendEnum backendType : BackendEnum.OpenGL) {
 
     void addBasicLightingPostProcess() {
         oglAddBasicLightingPostProcess();
-    }
-
-    void setDifferenceAggregationEnabled(bool enabled) {
-        oglSetDifferenceAggregationEnabled(enabled);
-    }
-
-    bool isDifferenceAggregationEnabled() {
-        return oglIsDifferenceAggregationEnabled();
-    }
-
-    void setDifferenceAggregationRegion(DifferenceEvaluationRegion region) {
-        oglSetDifferenceAggregationRegion(region);
-    }
-
-    DifferenceEvaluationRegion getDifferenceAggregationRegion() {
-        return oglGetDifferenceAggregationRegion();
-    }
-
-    bool evaluateDifferenceAggregation(RenderResourceHandle texture, int width, int height) {
-        return oglEvaluateDifferenceAggregation(texture, width, height);
-    }
-
-    bool fetchDifferenceAggregationResult(out DifferenceEvaluationResult result) {
-        return oglFetchDifferenceAggregationResult(result);
     }
 
     RenderShaderHandle createShader(string vertexSource, string fragmentSource) {

@@ -15,7 +15,7 @@ public import inmath.math;
 public import std.math : isNaN;
 public import inmath.interpolate;
 
-public import nlshim.math.transform;
+// transform removed
 public import nlshim.math.camera;
 public import nlshim.math.veca;
 

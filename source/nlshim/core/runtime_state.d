@@ -5,17 +5,7 @@ import std.exception : enforce;
 import core.stdc.string : memcpy;
 import nlshim.math : vec3, vec4;
 import nlshim.math.camera : Camera;
-import nlshim.core.param : Parameter, inParameterSetFactory;
-import nlshim.core.nodes : inInitNodes;
-import nlshim.core.nodes.common : inInitBlending;
-import nlshim.core.nodes.drawable : inInitDrawable;
-import nlshim.core.nodes.part : inInitPart;
-import nlshim.core.nodes.mask : inInitMask;
-import nlshim.core.nodes.composite : inInitComposite;
-import nlshim.core.nodes.composite.dcomposite : inInitDComposite;
-import nlshim.core.nodes.meshgroup : inInitMeshGroup;
-import nlshim.core.nodes.deformer.grid : inInitGridDeformer;
-import nlshim.core.nodes.deformer.path : inInitPathDeformer;
+import nlshim.core.render.support : inInitBlending;
 import nlshim.core.diff_collect : DifferenceEvaluationRegion, DifferenceEvaluationResult,
     rpSetDifferenceEvaluationEnabled, rpDifferenceEvaluationEnabled,
     rpSetDifferenceEvaluationRegion, rpGetDifferenceEvaluationRegion,
@@ -297,21 +287,7 @@ void initRendererCommon() {
     inPushViewport(0, 0);
 
     inInitBlending();
-    inInitNodes();
-    inInitDrawable();
-    inInitPart();
-    inInitMask();
-    inInitComposite();
-    inInitMeshGroup();
-    inInitDComposite();
-    inInitGridDeformer();
-    inInitPathDeformer();
 
-    inParameterSetFactory((data) {
-        Parameter param = new Parameter;
-        data.deserializeValue(param);
-        return param;
-    });
 
     inSetClearColor(0, 0, 0, 0);
 }

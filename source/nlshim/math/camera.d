@@ -10,7 +10,7 @@
 */
 module nlshim.math.camera;
 import nlshim.math;
-import nlshim;
+import nlshim.core.runtime_state : inGetViewport;
 import std.math : isFinite;
 
 /**

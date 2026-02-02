@@ -2,17 +2,28 @@ module nlshim.core.render.backends;
 
 import std.exception : enforce;
 
-import nlshim.core.nodes.part : Part;
-import nlshim.core.nodes.common : BlendMode;
+import nlshim.core.render.support : BlendMode;
 import nlshim.core.render.commands : PartDrawPacket, MaskApplyPacket,
     MaskDrawPacket, DynamicCompositeSurface, DynamicCompositePass;
-import nlshim.core.meshdata : MeshData;
-import nlshim.core.texture : Texture;
-import nlshim.core.shader : Shader;
-import nlshim.core.texture_types : Filtering, Wrapping;
-import nlshim.math : vec2, vec3, vec4, rect, mat4, Vec2Array, Vec3Array, Vec4Array;
-import nlshim.math.camera : Camera;
-import nlshim.core.diff_collect : DifferenceEvaluationRegion, DifferenceEvaluationResult;
+
+// Minimal placeholder types (nodes/math removed)
+struct Part { }
+struct MeshData { }
+struct Texture { }
+struct Shader { }
+enum Filtering { Nearest, Linear }
+enum Wrapping { Repeat, Clamp }
+alias vec2 = float[2];
+alias vec3 = float[3];
+alias vec4 = float[4];
+alias mat4 = float[16];
+alias rect = float[4];
+alias Vec2Array = vec2[];
+alias Vec3Array = vec3[];
+alias Vec4Array = vec4[];
+struct Camera { mat4 view; mat4 projection; vec3 position; }
+struct DifferenceEvaluationRegion { }
+struct DifferenceEvaluationResult { }
 
 /// Struct for backend-cached shared GPU state
 alias RenderResourceHandle = size_t;

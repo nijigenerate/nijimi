@@ -4,9 +4,9 @@ version (InDoesRender) {
 
 import bindbc.opengl;
 import std.algorithm : min;
-import nlshim.core.nodes.common : inUseMultistageBlending, nlIsTripleBufferFallbackEnabled,
+import nlshim.core.render.support : inUseMultistageBlending, nlIsTripleBufferFallbackEnabled,
     inSetBlendMode, inBlendModeBarrier;
-import nlshim.core.nodes.drawable : incDrawableBindVAO;
+import nlshim.core.render.support : incDrawableBindVAO;
 import nlshim.core.render.commands : PartDrawPacket;
 import nlshim.core.runtime_state : inGetViewport;
 import nlshim.core.render.backends.opengl.runtime :
@@ -26,7 +26,7 @@ import nlshim.core.render.backends.opengl.runtime :
 import nlshim.core.render.backends.opengl.blend : oglGetBlendShader, oglBlendToBuffer;
 import nlshim.core.texture : Texture;
 import nlshim.core.shader : Shader, shaderAsset, ShaderAsset;
-import nlshim.math : mat4;
+import nlshim.core.render.support : mat4;
 import nlshim.core.render.backends.opengl.drawable_buffers :
     oglGetSharedDeformBuffer,
     oglGetSharedVertexBuffer,

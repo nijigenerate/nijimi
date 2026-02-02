@@ -6,7 +6,7 @@
     Authors: Luna Nielsen
 */
 module nlshim.core.shader;
-import nlshim.math;
+import nlshim.core.render.support;
 import nlshim.core.render.backends : RenderShaderHandle, BackendEnum, SelectedBackend;
 version (InDoesRender) {
     import nlshim.core.runtime_state : currentRenderBackend, tryRenderBackend;
