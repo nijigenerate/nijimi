@@ -6,10 +6,6 @@ import core.stdc.string : memcpy;
 import nlshim.math : vec3, vec4;
 import nlshim.math.camera : Camera;
 import nlshim.core.render.support : inInitBlending;
-import nlshim.core.diff_collect : DifferenceEvaluationRegion, DifferenceEvaluationResult,
-    rpSetDifferenceEvaluationEnabled, rpDifferenceEvaluationEnabled,
-    rpSetDifferenceEvaluationRegion, rpGetDifferenceEvaluationRegion,
-    rpEvaluateDifference, rpFetchDifferenceResult;
 import nlshim.core.render.backends : RenderBackend, RenderResourceHandle;
 
 public int[] inViewportWidth;
@@ -299,25 +295,26 @@ void initRenderer() {
 }
 
 void inSetDifferenceAggregationEnabled(bool enabled) {
-    rpSetDifferenceEvaluationEnabled(enabled);
+    // diff aggregation not supported in this build
 }
 
 bool inIsDifferenceAggregationEnabled() {
-    return rpDifferenceEvaluationEnabled();
+    return false;
 }
 
 void inSetDifferenceAggregationRegion(int x, int y, int width, int height) {
-    rpSetDifferenceEvaluationRegion(DifferenceEvaluationRegion(x, y, width, height));
+    // no-op
 }
 
 DifferenceEvaluationRegion inGetDifferenceAggregationRegion() {
-    return rpGetDifferenceEvaluationRegion();
+    return DifferenceEvaluationRegion.init;
 }
 
 bool inEvaluateDifferenceAggregation(RenderResourceHandle texture, int viewportWidth, int viewportHeight) {
-    return rpEvaluateDifference(texture, viewportWidth, viewportHeight);
+    return false;
 }
 
 bool inFetchDifferenceAggregationResult(out DifferenceEvaluationResult result) {
-    return rpFetchDifferenceResult(result);
+    result = DifferenceEvaluationResult.init;
+    return false;
 }
