@@ -99,6 +99,12 @@ void main(string[] args) {
     bool isTest = false;
     string[] positional;
     int framesFlag = -1;
+    import core.stdc.stdlib : getenv;
+    import std.string : fromStringz;
+    import std.conv : to;
+    // Defaults for test mode
+    int testMaxFrames = 5;
+    auto testTimeout = 5.seconds;
     for (size_t i = 1; i < args.length; ++i) {
         auto arg = args[i];
         if (arg == "--test") {
@@ -130,7 +136,17 @@ void main(string[] args) {
     bool hasHeight = positional.length > 2 && positional[2].all!isDigit;
     int width = hasWidth ? positional[1].to!int : 1280;
     int height = hasHeight ? positional[2].to!int : 720;
-    writefln("nijiv (Unity DLL) start: file=%s, size=%sx%s (test=%s)", puppetPath, width, height, isTest);
+    // Env overrides for capture/debug
+    if (auto p = getenv("NJIV_TEST_FRAMES")) {
+        try testMaxFrames = to!int(fromStringz(p)); catch (Exception) {}
+    }
+    if (framesFlag > 0) testMaxFrames = framesFlag;
+    if (auto p = getenv("NJIV_TEST_TIMEOUT_MS")) {
+        import core.time : msecs;
+        try testTimeout = msecs(to!int(fromStringz(p))); catch (Exception) {}
+    }
+
+    writefln("nijiv (Unity DLL) start: file=%s, size=%sx%s (test=%s frames=%s timeout=%s)", puppetPath, width, height, isTest, testMaxFrames, testTimeout);
 
     auto glInit = initOpenGLBackend(width, height, isTest);
     scope (exit) {
@@ -253,13 +269,13 @@ void main(string[] args) {
         SDL_GL_SwapWindow(glInit.window);
 
         frameCount++;
-        if (isTest && frameCount >= 5) {
+        if (isTest && frameCount >= testMaxFrames) {
             writefln("Exit after %s frames (test)", frameCount);
             break;
         }
         auto elapsed = now - startTime;
-        if (isTest && elapsed > 5.seconds) {
-            writefln("Exit: elapsed %s > 5s test-timeout", elapsed.total!"seconds");
+        if (isTest && elapsed > testTimeout) {
+            writefln("Exit: elapsed %s > test-timeout %s", elapsed.total!"seconds", testTimeout.total!"seconds");
             break;
         }
     }

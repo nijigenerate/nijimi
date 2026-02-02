@@ -121,20 +121,20 @@ void oglDrawPartPacket(ref PartDrawPacket packet) {
 
 void oglExecutePartPacket(ref PartDrawPacket packet) {
     auto textures = packet.textures;
-    if (textures.length == 0) return;
+    if (textures.length == 0 || textures[0] is null || textures[0].backendHandle() is null) return;
 
     incDrawableBindVAO();
 
-    if (boundAlbedo != textures[0]) {
-        foreach(i, ref texture; textures) {
-            if (texture) texture.bind(cast(uint)i);
-            else {
-                glActiveTexture(GL_TEXTURE0 + cast(uint)i);
-                glBindTexture(GL_TEXTURE_2D, 0);
-            }
+    // Always make sure texture units 0..2 are explicitly bound each draw.
+    foreach(i; 0 .. 3) {
+        glActiveTexture(GL_TEXTURE0 + cast(uint)i);
+        if (i < textures.length && textures[i] !is null) {
+            textures[i].bind(cast(uint)i);
+        } else {
+            glBindTexture(GL_TEXTURE_2D, 0);
         }
-        boundAlbedo = textures[0];
     }
+    boundAlbedo = textures[0];
 
     auto matrix = packet.modelMatrix;
     mat4 renderMatrix = packet.renderMatrix;
@@ -293,6 +293,7 @@ void oglExecutePartPacket(ref PartDrawPacket packet) {
                 }
             }
 
+            // Legacy single-pass when fallback is disabled: set blend and draw once.
             setupShaderStage(packet, 2, matrix, renderMatrix);
             renderStage(packet, false);
         }

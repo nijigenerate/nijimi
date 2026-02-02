@@ -179,7 +179,7 @@ import nlshim.core.render.backends.opengl.mask :
 import nlshim.core.render.backends.opengl.dynamic_composite :
     oglBeginDynamicComposite,
     oglEndDynamicComposite;
-import nlshim.core.render.support : incDrawableBindVAO;
+import nlshim.core.render.support : incDrawableBindVAO, nlSetTripleBufferFallback;
 import NlCmds = nlshim.core.render.commands;
 alias PartDrawPacket = NlCmds.PartDrawPacket;
 alias MaskDrawPacket = NlCmds.MaskDrawPacket;
@@ -230,6 +230,8 @@ OpenGLBackendInit initOpenGLBackend(int width, int height, bool isTest) {
     auto glSupport = loadOpenGL();
     enforce(glSupport >= GLSupport.gl32, "Failed to load OpenGL bindings (support="~glSupport.to!string~")");
     SDL_GL_SetSwapInterval(1);
+    // Ensure a known active texture unit before any texture API calls.
+    glActiveTexture(GL_TEXTURE0);
 
     int drawableW = width;
     int drawableH = height;
@@ -739,7 +741,9 @@ void renderCommands(const OpenGLBackendInit* gl,
                             " defStride=", cmd.partPacket.deformAtlasStride,
                             " vOff=", cmd.partPacket.vertexOffset,
                             " uvOff=", cmd.partPacket.uvOffset,
-                            " defOff=", cmd.partPacket.deformOffset);
+                            " defOff=", cmd.partPacket.deformOffset,
+                            " blend=", cast(int)cmd.partPacket.blendingMode,
+                            " multi=", cmd.partPacket.useMultistageBlend);
                     if (f.isOpen) f.writeln("DrawPart idxCount=", cmd.partPacket.indexCount,
                                              " vtxCount=", cmd.partPacket.vertexCount,
                                              " vStride=", cmd.partPacket.vertexAtlasStride,
@@ -747,7 +751,9 @@ void renderCommands(const OpenGLBackendInit* gl,
                                              " defStride=", cmd.partPacket.deformAtlasStride,
                                              " vOff=", cmd.partPacket.vertexOffset,
                                              " uvOff=", cmd.partPacket.uvOffset,
-                                             " defOff=", cmd.partPacket.deformOffset);
+                                             " defOff=", cmd.partPacket.deformOffset,
+                                             " blend=", cast(int)cmd.partPacket.blendingMode,
+                                             " multi=", cmd.partPacket.useMultistageBlend);
                     // 実データを少量抜き出す（lane0/lane1 の先頭部分）
                     dumpBuf(oglGetSharedVertexBuffer(), cmd.partPacket.vertexOffset, "vLane0");
                     dumpBuf(oglGetSharedVertexBuffer(), cmd.partPacket.vertexAtlasStride + cmd.partPacket.vertexOffset, "vLane1");
@@ -793,6 +799,8 @@ void renderCommands(const OpenGLBackendInit* gl,
     // Backend/VAO/part resources are initialized once at startup (initOpenGLBackend).
     // Per-frame we only need to ensure the currently active FBO attachments stay bound.
     oglRebindActiveTargets();
+    // Disable triple-buffer fallback so legacy glBlendFunc path (ClipToLower 等) is used.
+    nlSetTripleBufferFallback(false);
     writeln("[renderCommands] normal path");
 
     // Unity 側は atlasStride を含んだ SoA（lane0→lane1）になっている。
@@ -949,6 +957,9 @@ void renderCommands(const OpenGLBackendInit* gl,
                 break;
             case NjgRenderCommandKind.BeginDynamicComposite: {
                 beginDynCount++;
+                writeln("[renderCommands] beginDyn texCount=", cmd.dynamicPass.textureCount,
+                        " tex0=", cmd.dynamicPass.textureCount>0 ? cmd.dynamicPass.textures[0] : 0,
+                        " stencil=", cmd.dynamicPass.stencil);
                 auto pass = new DynamicCompositePass;
                 auto surf = new DynamicCompositeSurface;
                 surf.textureCount = cmd.dynamicPass.textureCount;
@@ -968,6 +979,7 @@ void renderCommands(const OpenGLBackendInit* gl,
             }
             case NjgRenderCommandKind.EndDynamicComposite: {
                 endDynCount++;
+                writeln("[renderCommands] endDyn");
                 auto pass = new DynamicCompositePass;
                 auto surf = new DynamicCompositeSurface;
                 surf.textureCount = cmd.dynamicPass.textureCount;
@@ -1028,44 +1040,68 @@ void renderCommands(const OpenGLBackendInit* gl,
     writeln("[fb-sample] src rgba=", srcSample[0], ",", srcSample[1], ",", srcSample[2], ",", srcSample[3],
             " dst rgba=", dstSample[0], ",", dstSample[1], ",", dstSample[2], ",", dstSample[3],
             " sidebarAvg=", cast(double)sum / buf.length);
-    /* Thumbnail grid (デバッグ用途)。RenderDoc で VS Out が空になる原因となっている
-       INVALID_OPERATION (1282) がこのブロックで発生しているため、削除せず一時停止。
-       必要になったらコメント解除し、glUseProgram/VAO/attrib を完全にセットした上で
-       使うこと。 */
-//    writeln("[renderCommands] thumbnail grid");
-//    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-//    glDisable(GL_DEPTH_TEST);
-//    glDisable(GL_STENCIL_TEST);
-//    glDisable(GL_CULL_FACE);
-//    glViewport(0, 0, gl.drawableW, gl.drawableH);
-//    glDrawBuffer(GL_BACK);
-//    // Optional: clear a small sidebar for thumbnails so the main scene stays visible.
-//    glEnable(GL_SCISSOR_TEST);
-//    const float tile = 48;
-//    const float pad = 2;
-//    float sidebarW = (tile + pad) * 8; // room for a few columns
-//    glScissor(0, 0, cast(int)sidebarW, gl.drawableH);
-//    glClearColor(0.18f, 0.18f, 0.18f, 1.0f);
-//    glClear(GL_COLOR_BUFFER_BIT);
-//    glDisable(GL_SCISSOR_TEST);
-//    ensureDebugTestTex();
-//    float tx = pad;
-//    float ty = pad;
-//    // First tile: debug checkerboard
-//    drawTile(gDebugTestTex, tx, ty, tile, gl.drawableW, gl.drawableH);
-//    ty += tile + pad;
-//    foreach (handle, tex; gTextures) {
-//        if (tex !is null) {
-//            drawTile(tex.getTextureId(), tx, ty, tile, gl.drawableW, gl.drawableH);
-//            ty += tile + pad;
-//            if (ty + tile > gl.drawableH - pad) {
-//                ty = pad;
-//                tx += tile + pad;
-//            }
-//        }
-//    }
-//    GLenum err = glGetError();
-//    if (err != GL_NO_ERROR) writeln("[renderCommands] glGetError=", err);
+    // Thumbnail grid (debug). Renders 48x48 tiles for all textures in gTextures at left sidebar.
+    {
+        GLint prevFbo = 0, prevProgram = 0, prevVao = 0, prevDrawBuf = 0;
+        GLboolean prevDepth = 0, prevStencil = 0, prevCull = 0, prevScissor = 0;
+        GLint[4] prevViewport;
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFbo);
+        glGetIntegerv(GL_CURRENT_PROGRAM, &prevProgram);
+        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prevVao);
+        glGetIntegerv(GL_DRAW_BUFFER, &prevDrawBuf);
+        glGetIntegerv(GL_VIEWPORT, prevViewport.ptr);
+        prevDepth = glIsEnabled(GL_DEPTH_TEST);
+        prevStencil = glIsEnabled(GL_STENCIL_TEST);
+        prevCull = glIsEnabled(GL_CULL_FACE);
+        prevScissor = glIsEnabled(GL_SCISSOR_TEST);
+
+        writeln("[renderCommands] thumbnail grid");
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_STENCIL_TEST);
+        glDisable(GL_CULL_FACE);
+        glViewport(0, 0, gl.drawableW, gl.drawableH);
+        glDrawBuffer(GL_BACK);
+
+        glEnable(GL_SCISSOR_TEST);
+        const float tile = 48;
+        const float pad = 2;
+        float sidebarWidthPx = (tile + pad) * 8; // room for a few columns
+        glScissor(0, 0, cast(int)sidebarWidthPx, gl.drawableH);
+        glClearColor(0.18f, 0.18f, 0.18f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDisable(GL_SCISSOR_TEST);
+
+        ensureDebugTestTex();
+        float tx = pad;
+        float ty = pad;
+        // First tile: debug checkerboard
+        drawTile(gDebugTestTex, tx, ty, tile, gl.drawableW, gl.drawableH);
+        ty += tile + pad;
+        foreach (handle, tex; gTextures) {
+            if (tex !is null) {
+                drawTile(tex.getTextureId(), tx, ty, tile, gl.drawableW, gl.drawableH);
+                ty += tile + pad;
+                if (ty + tile > gl.drawableH - pad) {
+                    ty = pad;
+                    tx += tile + pad;
+                }
+            }
+        }
+        GLenum err = glGetError();
+        if (err != GL_NO_ERROR) writeln("[renderCommands] thumb glGetError=", err);
+
+        // Restore previous GL state.
+        if (prevDepth) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+        if (prevStencil) glEnable(GL_STENCIL_TEST); else glDisable(GL_STENCIL_TEST);
+        if (prevCull) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
+        if (prevScissor) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
+        glBindFramebuffer(GL_FRAMEBUFFER, prevFbo);
+        glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+        glDrawBuffer(prevDrawBuf);
+        glUseProgram(prevProgram);
+        glBindVertexArray(prevVao);
+    }
     // 次フレームへのリークを避ける
     glUseProgram(0);
     glBindVertexArray(0);

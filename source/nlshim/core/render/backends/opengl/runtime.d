@@ -225,6 +225,14 @@ public {
     Begins rendering to the framebuffer
 */
 void oglBeginScene() {
+    // Log & flush any pending GL errors before we start the frame.
+    GLenum preErr; int errCnt = 0;
+    while ((preErr = glGetError()) != GL_NO_ERROR) {
+        import std.stdio : writeln;
+        if (errCnt == 0) writeln("[glerr][pre-beginScene] err=", preErr);
+        errCnt++;
+    }
+
     boundAlbedo = null; // force texture rebind at start of frame
     glBindVertexArray(sceneVAO);
     glEnable(GL_BLEND);
@@ -252,7 +260,8 @@ void oglBeginScene() {
 
     // Bind and clear composite framebuffer
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, cfBuffer);
-    glDrawBuffers(3, [GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2].ptr);
+    immutable(GLenum[3]) cfTargets = [GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2];
+    glDrawBuffers(cast(GLsizei)cfTargets.length, cfTargets.ptr);
     glClearColor(0, 0, 0, 0);
 
     // Bind our framebuffer
@@ -262,22 +271,23 @@ void oglBeginScene() {
     GLenum status = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER);
     import std.stdio : writeln;
     if (status != GL_FRAMEBUFFER_COMPLETE) writeln("[fbo] incomplete status=", status);
-    GLint obj = 0; GLint type = 0;
-    glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &type);
-    glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &obj);
-    writeln("[fbo] C0 type=", type, " obj=", obj, " size=", inViewportWidth[$-1], "x", inViewportHeight[$-1]);
-    glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &type);
-    glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &obj);
-    writeln("[fbo] C1 type=", type, " obj=", obj);
-    glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &type);
-    glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &obj);
-    writeln("[fbo] C2 type=", type, " obj=", obj);
-    glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &type);
-    glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &obj);
-    writeln("[fbo] DS type=", type, " obj=", obj);
+
+    auto dumpAttachment = (GLenum attachment, string label) {
+        GLint obj = 0; GLint type = 0;
+        glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, attachment, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &type);
+        glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, attachment, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &obj);
+        writeln("[fbo] ", label, " type=", type, " obj=", obj);
+    };
+    dumpAttachment(GL_COLOR_ATTACHMENT0, "C0");
+    dumpAttachment(GL_COLOR_ATTACHMENT1, "C1");
+    dumpAttachment(GL_COLOR_ATTACHMENT2, "C2");
+    dumpAttachment(GL_DEPTH_STENCIL_ATTACHMENT, "DS");
 
     GLenum err = glGetError();
-    if (err != GL_NO_ERROR) writeln("[fbo] glGetError after bind=", err);
+    if (err != GL_NO_ERROR) {
+        writeln("[fbo] glGetError after bind=", err);
+        // Do not abort; continue so rendering can proceed and we can see effects.
+    }
 
     // First clear buffer 0
     glDrawBuffers(1, [GL_COLOR_ATTACHMENT0].ptr);
@@ -574,6 +584,8 @@ public void oglSwapMainCompositeBuffers() {
 public
 void oglResizeViewport(int width, int height) {
     version(InDoesRender) {
+        // Work on texture unit 0 to avoid “no texture bound” errors.
+        glActiveTexture(GL_TEXTURE0);
         // Render Framebuffer
         glBindTexture(GL_TEXTURE_2D, fAlbedo);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, null);

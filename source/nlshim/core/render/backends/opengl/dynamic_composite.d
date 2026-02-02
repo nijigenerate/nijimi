@@ -63,6 +63,16 @@ void oglBeginDynamicComposite(DynamicCompositePass pass) {
         debug (NijiliveRenderProfiler) writefln("[nijilive] oglBeginDynamicComposite skip: surface=null");
         return;
     }
+    // Validate generated textures.
+    if (surface.textureCount == 0 || surface.textures[0] is null ||
+        surface.textures[0].width <= 0 || surface.textures[0].height <= 0) {
+        import std.stdio : writeln;
+        writeln("[dyncomp] abort: invalid surface texCount=", surface.textureCount,
+                " tex0=", surface.textures.length ? surface.textures[0] : null,
+                " size=", surface.textures.length && surface.textures[0] !is null ? surface.textures[0].width : 0,
+                "x", surface.textures.length && surface.textures[0] !is null ? surface.textures[0].height : 0);
+        return;
+    }
     if (surface.textureCount == 0) {
         debug (NijiliveRenderProfiler) writefln("[nijilive] oglBeginDynamicComposite skip: textureCount=0");
         return;
@@ -126,7 +136,7 @@ void oglBeginDynamicComposite(DynamicCompositePass pass) {
 
     glDrawBuffers(cast(int)bufferCount, drawBuffers.ptr);
     glViewport(0, 0, tex.width, tex.height);
-    glClearColor(0, 0, 0, 0);
+    glClearColor(0, 0, 0, 0.1);
     glClear(GL_COLOR_BUFFER_BIT);
     glActiveTexture(GL_TEXTURE0);
     glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
