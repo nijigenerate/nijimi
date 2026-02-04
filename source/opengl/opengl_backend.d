@@ -50,7 +50,6 @@ extern(C) struct NjgPartDrawPacket {
     bool renderable;
     float[16] modelMatrix;
     float[16] renderMatrix;
-    vec2 renderScale;
     float renderRotation;
     vec3 clampedTint;
     vec3 clampedScreen;
@@ -834,6 +833,7 @@ void renderCommands(const OpenGLBackendInit* gl,
     // Keep backend stateless; the queue already tracks dynamic-composite depth.
     int dynDepth;
     int[] dynDrawStack;
+    bool[] dynLogged;
     DynamicCompositePass[] dynPassStack;
     writeln("[renderCommands] commands this frame=", cmds.length);
     size_t drawCount, beginMaskCount, applyMaskCount, beginMaskContentCount, endMaskCount, beginDynCount, endDynCount;
@@ -872,9 +872,13 @@ void renderCommands(const OpenGLBackendInit* gl,
                 oglExecutePartPacket(p);
                 debug {
                     import std.stdio : writefln;
-                    if (dynDrawStack.length > 0) {
+                    if (dynDrawStack.length > 0 && dynLogged.length && !dynLogged[$-1]) {
+                        dynLogged[$-1] = true;
                         auto rm = p.renderMatrix;
-                        writefln("[renderCommands] drawPart inDyn rm00=%.3f rm01=%.3f", rm[0][0], rm[0][1]);
+                        auto mm = p.modelMatrix;
+                        writefln("[renderCommands] drawPart inDyn rmRow0=(%.3f,%.3f,%.3f,%.3f) mmRow0=(%.3f,%.3f,%.3f,%.3f)",
+                            rm[0][0], rm[0][1], rm[0][2], rm[0][3],
+                            mm[0][0], mm[0][1], mm[0][2], mm[0][3]);
                     }
                     GLint[4] aEn;
                     GLint[4] aStride;
@@ -967,9 +971,13 @@ void renderCommands(const OpenGLBackendInit* gl,
                 beginDynCount++;
                 dynDrawStack ~= cast(int)drawCount;
                 dynDepth = cast(int)dynDrawStack.length;
+                dynLogged ~= false;
                 writeln("[renderCommands] beginDyn texCount=", cmd.dynamicPass.textureCount,
                         " tex0=", cmd.dynamicPass.textureCount>0 ? cmd.dynamicPass.textures[0] : 0,
                         " stencil=", cmd.dynamicPass.stencil,
+                        " scale=(", cmd.dynamicPass.scale.x, ",", cmd.dynamicPass.scale.y, ")",
+                        " rotZ=", cmd.dynamicPass.rotationZ,
+                        " autoScaled=", cmd.dynamicPass.autoScaled,
                         " drawCount=", drawCount);
                 auto pass = new DynamicCompositePass;
                 auto surf = new DynamicCompositeSurface;
@@ -1020,6 +1028,7 @@ void renderCommands(const OpenGLBackendInit* gl,
                     auto before = dynDrawStack[$-1];
                     dynDrawStack.length = dynDrawStack.length - 1;
                     dynDepth = cast(int)dynDrawStack.length;
+                    dynLogged.length = dynLogged.length - 1;
                     writeln("[renderCommands] endDyn drawsAdded=", cast(int)drawCount - before);
                 }
                 break;

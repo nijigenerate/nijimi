@@ -105,19 +105,13 @@ void oglBeginDynamicComposite(DynamicCompositePass pass) {
 
 
     logFboState("pre-begin");
-    // Save current framebuffer/viewport so we can restore.
+    // Save current framebuffer/viewport so we can restore later.
     GLint previousFramebuffer;
     GLint previousReadFramebuffer;
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previousFramebuffer);
     glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previousReadFramebuffer);
     pass.origBuffer = cast(RenderResourceHandle)previousFramebuffer;
     glGetIntegerv(GL_VIEWPORT, pass.origViewport.ptr);
-    // Save draw buffer count (fallback to 3 when unknown).
-    GLint maxDrawBuffers = 0;
-    glGetIntegerv(GL_MAX_COLOR_ATTACHMENTS, &maxDrawBuffers);
-    GLint[8] drawBufs;
-    glGetIntegerv(GL_DRAW_BUFFER0, &drawBufs[0]); // read only first
-    pass.drawBufferCount = surface.textureCount > 0 ? cast(int)surface.textureCount : 1;
 
     glBindFramebuffer(GL_FRAMEBUFFER, cast(GLuint)surface.framebuffer);
     logGlErr("bind offscreen FBO");
@@ -142,25 +136,18 @@ void oglBeginDynamicComposite(DynamicCompositePass pass) {
     if (surface.stencil !is null) {
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_TEXTURE_2D, textureId(surface.stencil), 0);
         glClear(GL_STENCIL_BUFFER_BIT);
+        pass.hasStencil = true;
     } else {
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+        pass.hasStencil = false;
     }
 
     inPushViewport(tex.width, tex.height);
 
-    // Adjust camera so offscreen composite renders upright into the target texture.
-    auto camera = inGetCamera();
-    camera.scale = vec2(1, -1);
-
-    float invScaleX = pass.scale.x == 0 ? 0 : 1 / pass.scale.x;
-    float invScaleY = pass.scale.y == 0 ? 0 : 1 / pass.scale.y;
-    auto scaling = mat4.identity.scaling(invScaleX, invScaleY, 1);
-    auto rotation = mat4.identity.rotateZ(-pass.rotationZ);
-    auto offsetMatrix = scaling * rotation;
-    camera.position = (offsetMatrix * -vec4(0, 0, 0, 1)).xy;
-    inSetCamera(camera);
+    // Camera is managed on the queue side; no mutation here.
 
     glDrawBuffers(cast(int)bufferCount, drawBuffers.ptr);
+    pass.drawBufferCount = cast(int)bufferCount;
     logGlErr("drawBuffers offscreen");
     glViewport(0, 0, tex.width, tex.height);
     glClearColor(0, 0, 0, 0);
@@ -206,17 +193,16 @@ void oglEndDynamicComposite(DynamicCompositePass pass) {
     // Rebind active attachments (respecting any swaps that happened while rendering).
     oglRebindActiveTargets();
 
+    // Restore framebuffer and viewport to the state saved at begin.
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, cast(GLuint)pass.origBuffer);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, cast(GLuint)pass.origBuffer);
     inPopViewport();
     glViewport(pass.origViewport[0], pass.origViewport[1],
         pass.origViewport[2], pass.origViewport[3]);
     if (pass.origBuffer != 0) {
-        int count = pass.drawBufferCount > 0 ? pass.drawBufferCount : 3;
         GLuint[3] bufs = [GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2];
-        glDrawBuffers(count, bufs.ptr);
+        glDrawBuffers(3, bufs.ptr);
     } else {
-        // Backbuffer: ensure both draw/read buffers restored.
         glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
         glReadBuffer(GL_BACK);
