@@ -17,10 +17,10 @@ import bindbc.sdl;
 import ogl = opengl.opengl_backend;
 import opengl.opengl_backend : NjgResult, UnityRendererConfig, UnityResourceCallbacks, RendererHandle, PuppetHandle, FrameConfig, CommandQueueView, SharedBufferSnapshot;
 import opengl.opengl_backend : initOpenGLBackend, OpenGLBackendInit;
-import nlshim.core.render.backends.opengl.runtime : oglResizeViewport;
+import opengl.opengl_backend : oglResizeViewport;
 import core.runtime : Runtime;
-import nlshim.core.render.support : inSetUpdateBounds;
-import nlshim.core.runtime_state : inSetViewport;
+import opengl.opengl_backend : inSetUpdateBounds;
+import opengl.opengl_backend : inSetViewport;
 enum MaskDrawableKind : uint { Part, Mask }
 
 extern(C) alias NjgLogFn = void function(const(char)* message, size_t length, void* userData);
