@@ -321,18 +321,6 @@ RenderResourceHandle getOrCreateIbo(const(ushort)* indices, size_t count) {
     return ibo;
 }
 
-void ensureSharedBuffers() {
-    if (gSharedVertexVbo == 0) glGenBuffers(1, &gSharedVertexVbo);
-    if (gSharedUvVbo == 0) glGenBuffers(1, &gSharedUvVbo);
-    if (gSharedDeformVbo == 0) glGenBuffers(1, &gSharedDeformVbo);
-}
-
-void ensureDebugBuffers() {
-    if (gDbgQuadVbo == 0) glGenBuffers(1, &gDbgQuadVbo);
-    if (gDbgQuadUvVbo == 0) glGenBuffers(1, &gDbgQuadUvVbo);
-    if (gDbgQuadEbo == 0) glGenBuffers(1, &gDbgQuadEbo);
-}
-
 void ensureThumbVao() {
     if (gThumbVao == 0) {
         glGenVertexArrays(1, &gThumbVao);
@@ -341,66 +329,6 @@ void ensureThumbVao() {
     if (gThumbQuadEbo == 0) glGenBuffers(1, &gThumbQuadEbo);
 }
 
-void ensureThumbTarget() {
-    const int thumbSize = 48;
-    if (gThumbColor == 0) {
-        glGenTextures(1, &gThumbColor);
-        glBindTexture(GL_TEXTURE_2D, gThumbColor);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, thumbSize, thumbSize, 0, GL_RGBA, GL_UNSIGNED_BYTE, null);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    }
-    if (gThumbFbo == 0) {
-        glGenFramebuffers(1, &gThumbFbo);
-        glBindFramebuffer(GL_FRAMEBUFFER, gThumbFbo);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, gThumbColor, 0);
-        auto status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-        enforce(status == GL_FRAMEBUFFER_COMPLETE, "thumb FBO incomplete: "~status.to!string);
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    }
-}
-
-/// Draw gDebugTestTex as a fullscreen quad using client arrays (no VBO/VAO reliance).
-private void drawFullscreenTest(int w, int h, GLuint texId = 0) {
-    ensureThumbProgram();
-    ensureThumbVao();
-    ensureDebugTestTex();
-    glUseProgram(gThumbProg);
-    // Clip-space fullscreen triangle (no matrix dependency)
-    if (gThumbMvpLoc >= 0) {
-        // identity
-        float[16] m = [1,0,0,0,
-                       0,1,0,0,
-                       0,0,1,0,
-                       0,0,0,1];
-        glUniformMatrix4fv(gThumbMvpLoc, 1, GL_FALSE, m.ptr);
-    }
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, texId != 0 ? texId : gDebugTestTex);
-
-    // pos(x,y), uv
-    // 3 vertices * 4 floats (x,y,u,v)
-    float[12] verts = [
-        -1, -1,  0, 0,
-         3, -1,  2, 0,
-        -1,  3,  0, 2
-    ];
-    glBindVertexArray(gThumbVao);
-    glBindBuffer(GL_ARRAY_BUFFER, gThumbQuadVbo);
-    glBufferData(GL_ARRAY_BUFFER, verts.length * float.sizeof, verts.ptr, GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, cast(int)(4 * float.sizeof), cast(void*)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, cast(int)(4 * float.sizeof), cast(void*)(2 * float.sizeof));
-    glDisableVertexAttribArray(2);
-    glDisableVertexAttribArray(3);
-    glDisableVertexAttribArray(4);
-    glDisableVertexAttribArray(5);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
-    glBindVertexArray(0);
-}
 
 /// Draw a texture as a rectangle in screen pixel coordinates (uses same simple shader).
 private void drawTile(GLuint texId, float x, float y, float size, int screenW, int screenH) {
@@ -450,45 +378,6 @@ private void drawTile(GLuint texId, float x, float y, float size, int screenW, i
     glDisableVertexAttribArray(5);
     glDrawArrays(GL_TRIANGLES, 0, 6);
     glBindVertexArray(0);
-}
-
-/// Convenience: draw the debug checkerboard at (x,y) with 48x48 size on the screen.
-private void drawTestTile(float x, float y, int screenW, int screenH) {
-    ensureDebugTestTex();
-    drawTile(gDebugTestTex, x, y, 48, screenW, screenH);
-}
-
-/// Minimal helper: read a GL texture, downscale on CPU to 48x48, write PPM (no external libs).
-void saveTextureThumbnail(GLuint texId, string path, int target = 48) {
-    if (texId == 0) return;
-    glBindTexture(GL_TEXTURE_2D, texId);
-    GLint w = 0, h = 0;
-    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
-    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
-    if (w <= 0 || h <= 0) return;
-    auto full = new ubyte[w * h * 4];
-    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, full.ptr);
-    auto outBuf = new ubyte[target * target * 3];
-    foreach (ty; 0 .. target) {
-        foreach (tx; 0 .. target) {
-            size_t sx = cast(size_t)(tx * w / target);
-            size_t sy = cast(size_t)(ty * h / target);
-            auto si = (sy * w + sx) * 4;
-            auto di = (ty * target + tx) * 3;
-            outBuf[di + 0] = full[si + 0];
-            outBuf[di + 1] = full[si + 1];
-            outBuf[di + 2] = full[si + 2];
-        }
-    }
-    // Write PPM (binary P6)
-    import std.format : format;
-    auto headerStr = format("P6\n%d %d\n255\n", target, target);
-    auto header = cast(ubyte[])headerStr;
-    ubyte[] data;
-    data.length = header.length + outBuf.length;
-    data[0 .. header.length] = header[];
-    data[header.length .. $] = outBuf[];
-    write(path, data);
 }
 
 void ensureDebugTestTex() {
@@ -560,128 +449,6 @@ void ensureThumbProgram() {
     if (albedoLoc >= 0) glUniform1i(albedoLoc, 0);
     gThumbMvpLoc = glGetUniformLocation(gThumbProg, "mvp");
     glUseProgram(0);
-}
-
-bool sliceHasRoom(NjgBufferSlice slice, size_t offset, size_t stride, size_t count) {
-    if (slice.data is null || slice.length == 0) return false;
-    auto lane0End = offset + count;
-    auto lane1End = offset + stride + count;
-    return lane0End <= slice.length && lane1End <= slice.length;
-}
-
-/// Debug: draw a texture as a 48x48 thumbnail at pixel (x,y) on the default framebuffer.
-void debugDrawThumbnail(Texture tex, float x, float y, float size, int screenW, int screenH) {
-    if (tex is null) return;
-    ensureThumbProgram();
-    ensureThumbVao();
-    glUseProgram(gThumbProg);
-    glBindVertexArray(gThumbVao);
-    glActiveTexture(GL_TEXTURE0);
-    tex.bind();
-    auto ortho = mat4.orthographic(0f, cast(float)screenW, cast(float)screenH, 0f, -1f, 1f);
-    if (gThumbMvpLoc >= 0) glUniformMatrix4fv(gThumbMvpLoc, 1, GL_FALSE, ortho.ptr);
-
-    float left = x;
-    float right = x + size;
-    float top = y;
-    float bottom = y + size;
-
-    float[16] verts = [
-        left,  top,    0, 0,
-        right, top,    1, 0,
-        left,  bottom, 0, 1,
-        right, bottom, 1, 1
-    ];
-    glBindBuffer(GL_ARRAY_BUFFER, gThumbQuadVbo);
-    glBufferData(GL_ARRAY_BUFFER, verts.length * float.sizeof, verts.ptr, GL_STREAM_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, cast(int)(4 * float.sizeof), cast(void*)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, cast(int)(4 * float.sizeof), cast(void*)(2 * float.sizeof));
-    glDisableVertexAttribArray(2);
-    glDisableVertexAttribArray(3);
-    glDisableVertexAttribArray(4);
-    glDisableVertexAttribArray(5);
-
-    static immutable ushort[6] idx = [0,1,2, 2,1,3];
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gThumbQuadEbo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, idx.length * ushort.sizeof, idx.ptr, GL_STATIC_DRAW);
-    glDrawElements(GL_TRIANGLES, idx.length, GL_UNSIGNED_SHORT, null);
-
-    glBindVertexArray(0);
-}
-
-/// Draw a thumbnail using a raw GL texture id (used after rendering into a thumb FBO).
-void debugDrawThumbnailId(GLuint texId, float x, float y, float size, int screenW, int screenH) {
-    if (texId == 0) return;
-    ensureThumbProgram();
-    ensureThumbVao();
-    glBindVertexArray(gThumbVao);
-    auto ortho = mat4.orthographic(0f, cast(float)screenW, cast(float)screenH, 0f, -1f, 1f);
-    glUseProgram(gThumbProg);
-    if (gThumbMvpLoc >= 0) glUniformMatrix4fv(gThumbMvpLoc, 1, GL_FALSE, ortho.ptr);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, texId);
-
-    float left = x;
-    float right = x + size;
-    float top = y;
-    float bottom = y + size;
-
-    float[16] verts = [
-        left,  top,    0, 0,
-        right, top,    1, 0,
-        left,  bottom, 0, 1,
-        right, bottom, 1, 1
-    ];
-    glBindBuffer(GL_ARRAY_BUFFER, gThumbQuadVbo);
-    glBufferData(GL_ARRAY_BUFFER, verts.length * float.sizeof, verts.ptr, GL_STREAM_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, cast(int)(4 * float.sizeof), cast(void*)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, cast(int)(4 * float.sizeof), cast(void*)(2 * float.sizeof));
-    glDisableVertexAttribArray(2);
-    glDisableVertexAttribArray(3);
-    glDisableVertexAttribArray(4);
-    glDisableVertexAttribArray(5);
-
-    static immutable ushort[6] idx = [0,1,2, 2,1,3];
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gThumbQuadEbo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, idx.length * ushort.sizeof, idx.ptr, GL_STATIC_DRAW);
-    glDrawElements(GL_TRIANGLES, idx.length, GL_UNSIGNED_SHORT, null);
-
-    glBindVertexArray(0);
-}
-
-
-void setBlendMode(int mode) {
-    GLenum src = GL_ONE;
-    GLenum dst = GL_ONE_MINUS_SRC_ALPHA;
-    GLenum op = GL_FUNC_ADD;
-    switch (mode) {
-        case 1: // Multiply
-            src = GL_DST_COLOR;
-            dst = GL_ONE_MINUS_SRC_ALPHA;
-            break;
-        case 2: // Screen
-            src = GL_ONE;
-            dst = GL_ONE_MINUS_SRC_COLOR;
-            break;
-        case 7: // Add
-            src = GL_ONE;
-            dst = GL_ONE;
-            break;
-        case 14: // Subtract
-            src = GL_ONE;
-            dst = GL_ONE;
-            op = GL_FUNC_REVERSE_SUBTRACT;
-            break;
-        default:
-            break;
-    }
-    glEnable(GL_BLEND);
-    glBlendFunc(src, dst);
-    glBlendEquation(op);
 }
 
 // Bridge: convert DLL packets to backend PartDrawPacket/MaskDrawPacket and call ogl*.
@@ -1146,20 +913,6 @@ bool inDbgDrawMeshOutlines = false;
 bool inDbgDrawMeshVertexPoints = false;
 bool inDbgDrawMeshOrientation = false;
 
-void inDbgPointsSize(float size) {
-    auto backend = backendForDebug();
-    if (backend !is null) {
-        backend.setDebugPointSize(size);
-    }
-}
-
-void inDbgLineWidth(float size) {
-    auto backend = backendForDebug();
-    if (backend !is null) {
-        backend.setDebugLineWidth(size);
-    }
-}
-
 void inDbgSetBuffer(Vec3Array points) {
     size_t vertexCount = points.length;
     size_t indexCount = vertexCount == 0 ? 0 : vertexCount + 1;
@@ -1191,20 +944,6 @@ void inDbgSetBuffer(Vec3Array points, ushort[] indices) {
     hasDebugBuffer = true;
 }
 
-void inDbgDrawPoints(vec4 color, mat4 transform = mat4.identity) {
-    if (!hasDebugBuffer) return;
-    auto backend = backendForDebug();
-    if (backend is null) return;
-    backend.drawDebugPoints(color, inGetCamera().matrix * transform);
-}
-
-void inDbgDrawLines(vec4 color, mat4 transform = mat4.identity) {
-    if (!hasDebugBuffer) return;
-    auto backend = backendForDebug();
-    if (backend is null) return;
-    backend.drawDebugLines(color, inGetCamera().matrix * transform);
-}
-
 // ---- source/nlshim/core/package.d ----
 /*
     nijilive Rendering
@@ -1217,12 +956,12 @@ void inDbgDrawLines(vec4 color, mat4 transform = mat4.identity) {
     Authors: Luna Nielsen
 */
 
-version(InDoesRender) {
+
     version(UseQueueBackend) {
     } else {
         // OpenGL backend is provided by top-level opengl/* modules; avoid importing nlshim copies.
     }
-}
+
 //import std.stdio;
 
 /**
@@ -1268,7 +1007,7 @@ enum InterpolateMode {
 // ---- source/nlshim/core/render/backends/opengl/blend.d ----
 
 
-version (InDoesRender) {
+
 
 import bindbc.opengl;
 import bindbc.opengl.context;
@@ -1301,60 +1040,6 @@ Shader oglGetBlendShader(BlendMode mode) {
     ensureBlendShadersInitialized();
     auto shader = mode in blendShaders;
     return shader ? *shader : null;
-}
-
-void oglBlendToBuffer(
-    Shader shader,
-    BlendMode mode,
-    GLuint dstFramebuffer,
-    GLuint bgAlbedo, GLuint bgEmissive, GLuint bgBump,
-    GLuint fgAlbedo, GLuint fgEmissive, GLuint fgBump
-) {
-    if (shader is null) return;
-
-    glBindFramebuffer(GL_FRAMEBUFFER, dstFramebuffer);
-    glDrawBuffers(3, [GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2].ptr);
-
-    shader.use();
-    GLint modeUniform = shader.getUniformLocation("blend_mode");
-    if (modeUniform != -1) {
-        shader.setUniform(modeUniform, cast(int)mode);
-    }
-
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, bgAlbedo);
-    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, bgEmissive);
-    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, bgBump);
-
-    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, fgAlbedo);
-    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, fgEmissive);
-    glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, fgBump);
-
-    shader.setUniform(shader.getUniformLocation("bg_albedo"), 0);
-    shader.setUniform(shader.getUniformLocation("bg_emissive"), 1);
-    shader.setUniform(shader.getUniformLocation("bg_bump"), 2);
-    shader.setUniform(shader.getUniformLocation("fg_albedo"), 3);
-    shader.setUniform(shader.getUniformLocation("fg_emissive"), 4);
-    shader.setUniform(shader.getUniformLocation("fg_bump"), 5);
-
-    GLint mvpUniform = shader.getUniformLocation("mvp");
-    if (mvpUniform != -1) {
-        shader.setUniform(mvpUniform, mat4.identity);
-    }
-
-    GLint offsetUniform = shader.getUniformLocation("offset");
-    if (offsetUniform != -1) {
-        shader.setUniform(offsetUniform, vec2(0, 0));
-    }
-
-    // VAO not used; handled in shader setup.
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-
-    glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, 0);
-    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, 0);
-    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, 0);
-    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, 0);
-    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, 0);
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, 0);
 }
 
 // Some platforms/bindings lack GL_KHR_blend_equation_advanced; fall back safely.
@@ -1437,42 +1122,14 @@ bool oglSupportsAdvancedBlend() {
 bool oglSupportsAdvancedBlendCoherent() {
     return hasKHRBlendEquationAdvancedCoherent;
 }
-
-} else {
-
-alias GLuint = uint;
-
-Shader oglGetBlendShader(BlendMode) { return null; }
-void oglBlendToBuffer(Shader, BlendMode, GLuint, GLuint, GLuint, GLuint, GLuint, GLuint, GLuint) {}
-void oglSetAdvancedBlendCoherent(bool) {}
-void oglSetLegacyBlendMode(BlendMode) {}
-void oglSetAdvancedBlendEquation(BlendMode) {}
-void oglIssueBlendBarrier() {}
-bool oglSupportsAdvancedBlend() { return false; }
-bool oglSupportsAdvancedBlendCoherent() { return false; }
-
-}
-
-// ---- source/nlshim/core/render/backends/opengl/buffer_sync.d ----
-
-version (InDoesRender) {
-
-// GL buffer fences are disabled to avoid per-draw glFenceSync spam.
-// Keep stubs so call sites compile; they intentionally do nothing.
-void waitForBuffer(uint /*buffer*/, string /*label*/) {}
 void markBufferInUse(uint /*buffer*/) {}
 
-} else {
 
-void waitForBuffer(uint, string) {}
-void markBufferInUse(uint) {}
-
-}
 
 // ---- source/nlshim/core/render/backends/opengl/debug_renderer.d ----
 
 
-version (InDoesRender) {
+
 
 import bindbc.opengl;
 
@@ -1624,17 +1281,7 @@ package(opengl) void oglDrawDebugLines(vec4 color, mat4 mvp) {
     glDisable(GL_LINE_SMOOTH);
 }
 
-} else {
 
-package(opengl) void oglInitDebugRenderer() {}
-package(opengl) void oglSetDebugPointSize(float) {}
-package(opengl) void oglSetDebugLineWidth(float) {}
-package(opengl) void oglUploadDebugBuffer(Vec3Array, ushort[]) {}
-package(opengl) void oglSetDebugExternalBuffer(RenderResourceHandle, RenderResourceHandle, int) {}
-package(opengl) void oglDrawDebugPoints(vec4, mat4) {}
-package(opengl) void oglDrawDebugLines(vec4, mat4) {}
-
-}
 
 
 
@@ -1652,9 +1299,6 @@ version (unittest) {
         ibo = 0;
     }
     void oglUploadDrawableIndices(RenderResourceHandle, ushort[]) {}
-    void oglUploadSharedVertexBuffer(Vec2Array) {}
-    void oglUploadSharedUvBuffer(Vec2Array) {}
-    void oglUploadSharedDeformBuffer(Vec2Array) {}
     GLuint oglGetSharedVertexBuffer() { return 0; }
     GLuint oglGetSharedUvBuffer() { return 0; }
     GLuint oglGetSharedDeformBuffer() { return 0; }
@@ -1746,38 +1390,7 @@ void oglUploadDrawableIndices(RenderResourceHandle ibo, ushort[] indices) {
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, sharedIndexBuffer);
     glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, cast(GLintptr)range.offset, bytes, indices.ptr);
 }
-
-void oglUploadSharedVertexBuffer(Vec2Array vertices) {
-    if (vertices.length == 0) {
-        return;
-    }
-    if (sharedVertexBuffer == 0) {
-        glGenBuffers(1, &sharedVertexBuffer);
-    }
-    glUploadFloatVecArray(sharedVertexBuffer, vertices, GL_DYNAMIC_DRAW, "UploadVertices");
-}
-
-void oglUploadSharedUvBuffer(Vec2Array uvs) {
-    if (uvs.length == 0) {
-        return;
-    }
-    if (sharedUvBuffer == 0) {
-        glGenBuffers(1, &sharedUvBuffer);
-    }
-    glUploadFloatVecArray(sharedUvBuffer, uvs, GL_DYNAMIC_DRAW, "UploadUV");
-}
-
-void oglUploadSharedDeformBuffer(Vec2Array deformation) {
-    if (deformation.length == 0) {
-        return;
-    }
-    if (sharedDeformBuffer == 0) {
-        glGenBuffers(1, &sharedDeformBuffer);
-    }
-    glUploadFloatVecArray(sharedDeformBuffer, deformation, GL_DYNAMIC_DRAW, "UploadDeform");
-}
-
-GLuint oglGetSharedVertexBuffer() {
+uint oglGetSharedVertexBuffer() {
     if (sharedVertexBuffer == 0) {
         glGenBuffers(1, &sharedVertexBuffer);
     }
@@ -1809,7 +1422,7 @@ void oglDrawDrawableElements(RenderResourceHandle ibo, size_t indexCount) {
 
 // ---- source/nlshim/core/render/backends/opengl/dynamic_composite.d ----
 
-version (InDoesRender) {
+
 
 import bindbc.opengl;
 version (NijiliveRenderProfiler) {
@@ -1821,14 +1434,6 @@ version (NijiliveRenderProfiler) {
 
     __gshared ulong gCompositeCpuAccumUsec;
     __gshared ulong gCompositeGpuAccumUsec;
-
-    void resetCompositeAccum() {
-        gCompositeCpuAccumUsec = 0;
-        gCompositeGpuAccumUsec = 0;
-    }
-
-    ulong compositeCpuAccumUsec() { return gCompositeCpuAccumUsec; }
-    ulong compositeGpuAccumUsec() { return gCompositeGpuAccumUsec; }
 }
 
 private GLuint textureId(Texture texture) {
@@ -2041,25 +1646,6 @@ void oglEndDynamicComposite(DynamicCompositePass pass) {
         tex.genMipmap();
     }
 }
-
-void oglDestroyDynamicComposite(DynamicCompositeSurface surface) {
-    if (surface is null) return;
-    if (surface.framebuffer != 0) {
-        auto buffer = cast(GLuint)surface.framebuffer;
-        glDeleteFramebuffers(1, &buffer);
-        surface.framebuffer = 0;
-    }
-}
-
-} else {
-
-
-void oglBeginDynamicComposite(DynamicCompositePass) {}
-void oglEndDynamicComposite(DynamicCompositePass) {}
-void oglDestroyDynamicComposite(DynamicCompositeSurface) {}
-
-}
-
 // ---- source/nlshim/core/render/backends/opengl/handles.d ----
 
 import std.exception : enforce;
@@ -2087,7 +1673,7 @@ GLTextureHandle requireGLTexture(RenderTextureHandle handle) {
 // ---- source/nlshim/core/render/backends/opengl/mask.d ----
 
 
-version (InDoesRender) {
+
 
 import bindbc.opengl;
 
@@ -2201,92 +1787,24 @@ void oglExecuteMaskApplyPacket(ref MaskApplyPacket packet) {
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 }
 
-} else {
 
-
-void oglBeginMask(bool) {}
-void oglEndMask() {}
-void oglBeginMaskContent() {}
-void oglExecuteMaskPacket(ref MaskDrawPacket) {}
-void oglExecuteMaskApplyPacket(ref MaskApplyPacket) {}
-void oglInitMaskBackend() {}
-
-}
 
 
 // ---- source/nlshim/core/render/backends/opengl/package.d ----
 
-version (InDoesRender) {
+
 
 
 // queue/backend not used in this binary; avoid pulling queue modules
 import inmath.linalg : rect;
 
 class RenderingBackend(BackendEnum backendType : BackendEnum.OpenGL) {
-    void initializeRenderer() {
-        oglInitRenderer();
-        oglInitDrawableBackend();
-        oglInitPartBackendResources();
-        oglInitMaskBackend();
-    }
-
     void resizeViewportTargets(int width, int height) {
         oglResizeViewport(width, height);
     }
 
-    void dumpViewport(ref ubyte[] data, int width, int height) {
-        oglDumpViewport(data, width, height);
-    }
-
-    void beginScene() {
-        auto profile = profileScope("BeginScene");
-        oglBeginScene();
-    }
-
-    void endScene() {
-        auto profile = profileScope("EndScene");
-        oglEndScene();
-        renderProfilerFrameCompleted();
-    }
-
-    void postProcessScene() {
-        auto profile = profileScope("PostProcess");
-        oglPostProcessScene();
-    }
-
-    void initializeDrawableResources() {
-        oglInitDrawableBackend();
-    }
-
     void bindDrawableVao() {
         oglBindDrawableVao();
-    }
-
-    void createDrawableBuffers(out RenderResourceHandle ibo) {
-        oglCreateDrawableBuffers(ibo);
-    }
-
-    void uploadDrawableIndices(RenderResourceHandle ibo, ushort[] indices) {
-        oglUploadDrawableIndices(ibo, indices);
-    }
-
-    void uploadSharedVertexBuffer(Vec2Array vertices) {
-        auto profile = profileScope("UploadVertices");
-        oglUploadSharedVertexBuffer(vertices);
-    }
-
-    void uploadSharedUvBuffer(Vec2Array uvs) {
-        auto profile = profileScope("UploadUV");
-        oglUploadSharedUvBuffer(uvs);
-    }
-
-    void uploadSharedDeformBuffer(Vec2Array deform) {
-        auto profile = profileScope("UploadDeformAtlas");
-        oglUploadSharedDeformBuffer(deform);
-    }
-
-    void drawDrawableElements(RenderResourceHandle ibo, size_t indexCount) {
-        oglDrawDrawableElements(ibo, indexCount);
     }
 
     bool supportsAdvancedBlend() {
@@ -2317,14 +1835,6 @@ class RenderingBackend(BackendEnum backendType : BackendEnum.OpenGL) {
         oglInitDebugRenderer();
     }
 
-    void setDebugPointSize(float size) {
-        oglSetDebugPointSize(size);
-    }
-
-    void setDebugLineWidth(float size) {
-        oglSetDebugLineWidth(size);
-    }
-
     void uploadDebugBuffer(Vec3Array points, ushort[] indices) {
         oglUploadDebugBuffer(points, indices);
     }
@@ -2333,91 +1843,11 @@ class RenderingBackend(BackendEnum backendType : BackendEnum.OpenGL) {
         oglSetDebugExternalBuffer(vbo, ibo, count);
     }
 
-    void drawDebugPoints(vec4 color, mat4 mvp) {
-        oglDrawDebugPoints(color, mvp);
-    }
-
-    void drawDebugLines(vec4 color, mat4 mvp) {
-        oglDrawDebugLines(color, mvp);
-    }
-
-    void drawPartPacket(ref PartDrawPacket packet) {
-        auto profile = profileScope("DrawPart");
-        oglDrawPartPacket(packet);
-    }
-
-    void beginDynamicComposite(DynamicCompositePass pass) {
-        oglBeginDynamicComposite(pass);
-    }
-
-    void endDynamicComposite(DynamicCompositePass pass) {
-        oglEndDynamicComposite(pass);
-    }
-
-    void destroyDynamicComposite(DynamicCompositeSurface surface) {
-        oglDestroyDynamicComposite(surface);
-    }
-
-    void beginMask(bool useStencil) {
-        auto profile = profileScope("BeginMask");
-        oglBeginMask(useStencil);
-    }
-
-    void applyMask(ref MaskApplyPacket packet) {
-        auto profile = profileScope("ApplyMask");
-        oglExecuteMaskApplyPacket(packet);
-    }
-
-    void beginMaskContent() {
-        auto profile = profileScope("BeginMaskContent");
-        oglBeginMaskContent();
-    }
-
-    void endMask() {
-        auto profile = profileScope("EndMask");
-        oglEndMask();
-    }
-
     // drawTexture* helpers removed; viewer uses packet-driven path only.
 
-    RenderResourceHandle framebufferHandle() {
-        return cast(RenderResourceHandle)oglGetFramebuffer();
-    }
-
-    RenderResourceHandle renderImageHandle() {
-        return cast(RenderResourceHandle)oglGetRenderImage();
-    }
-
-    RenderResourceHandle mainAlbedoHandle() {
-        return cast(RenderResourceHandle)oglGetMainAlbedo();
-    }
-
-    RenderResourceHandle mainEmissiveHandle() {
-        return cast(RenderResourceHandle)oglGetMainEmissive();
-    }
-
-    RenderResourceHandle mainBumpHandle() {
-        return cast(RenderResourceHandle)oglGetMainBump();
-    }
-
-    RenderResourceHandle blendFramebufferHandle() {
-        return cast(RenderResourceHandle)oglGetBlendFramebuffer();
-    }
-
-    RenderResourceHandle blendAlbedoHandle() {
-        return cast(RenderResourceHandle)oglGetBlendAlbedo();
-    }
-
-    RenderResourceHandle blendEmissiveHandle() {
-        return cast(RenderResourceHandle)oglGetBlendEmissive();
-    }
-
-    RenderResourceHandle blendBumpHandle() {
-        return cast(RenderResourceHandle)oglGetBlendBump();
-    }
-
-    void addBasicLightingPostProcess() {
-        oglAddBasicLightingPostProcess();
+    void useShader(RenderShaderHandle shader) {
+        auto handle = requireGLShader(shader);
+        oglUseShaderProgram(handle.shader);
     }
 
     RenderShaderHandle createShader(string vertexSource, string fragmentSource) {
@@ -2430,11 +1860,6 @@ class RenderingBackend(BackendEnum backendType : BackendEnum.OpenGL) {
         auto handle = requireGLShader(shader);
         oglDestroyShaderProgram(handle.shader);
         handle.shader = ShaderProgramHandle.init;
-    }
-
-    void useShader(RenderShaderHandle shader) {
-        auto handle = requireGLShader(shader);
-        oglUseShaderProgram(handle.shader);
     }
 
     int getShaderUniformLocation(RenderShaderHandle shader, string name) {
@@ -2501,12 +1926,6 @@ class RenderingBackend(BackendEnum backendType : BackendEnum.OpenGL) {
         oglUploadTextureData(handle.id, width, height, inChannels, outChannels, stencil, data);
     }
 
-    void updateTextureRegion(RenderTextureHandle texture, int x, int y, int width,
-                                      int height, int channels, ubyte[] data) {
-        auto handle = requireGLTexture(texture);
-        oglUpdateTextureRegion(handle.id, x, y, width, height, channels, data);
-    }
-
     void generateTextureMipmap(RenderTextureHandle texture) {
         auto handle = requireGLTexture(texture);
         oglGenerateTextureMipmap(handle.id);
@@ -2543,11 +1962,11 @@ class RenderingBackend(BackendEnum backendType : BackendEnum.OpenGL) {
     }
 }
 
-}
+
 
 // ---- source/nlshim/core/render/backends/opengl/part.d ----
 
-version (InDoesRender) {
+
 
 import bindbc.opengl;
 import std.algorithm : min;
@@ -2632,12 +2051,6 @@ void oglInitPartBackendResources() {
     mthreshold = partMaskShader.getUniformLocation("threshold");
 
 }
-
-void oglDrawPartPacket(ref PartDrawPacket packet) {
-    if (!packet.renderable) return;
-    oglExecutePartPacket(packet);
-}
-
 void oglExecutePartPacket(ref PartDrawPacket packet) {
     auto textures = packet.textures;
     if (textures.length == 0) return;
@@ -2992,14 +2405,7 @@ private void renderStage(ref PartDrawPacket packet, bool advanced) {
     }
 }
 
-} else {
 
-
-void oglInitPartBackendResources() {}
-void oglDrawPartPacket(ref PartDrawPacket) {}
-void oglExecutePartPacket(ref PartDrawPacket) {}
-
-}
 
 // ---- source/nlshim/core/render/backends/opengl/runtime.d ----
 
@@ -3149,7 +2555,7 @@ public {
         inSetViewport(640, 480);
         version(InDoesRender) inInitDebug();
 
-        version (InDoesRender) {
+        
             
         // Shader for scene
         basicSceneShader = PostProcessingShader(new Shader(SceneShaderSource));
@@ -3209,7 +2615,7 @@ public {
             // go back to default fb
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-        }
+        
     }
 }
 
@@ -3297,47 +2703,6 @@ void oglBeginScene() {
     // Finally we render to all buffers
     glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     glDrawBuffers(3, [GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2].ptr);
-}
-
-/**
-    Begins a composition step
-*/
-void oglBeginComposite() {
-
-    CompositeFrameState frameState;
-    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &frameState.framebuffer);
-    glGetIntegerv(GL_VIEWPORT, frameState.viewport.ptr);
-    compositeScopeStack ~= frameState;
-    isCompositing = true;
-
-    immutable(GLenum[3]) attachments = [GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2];
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, cfBuffer);
-    glDrawBuffers(cast(GLsizei)attachments.length, attachments.ptr);
-    glClearColor(0, 0, 0, 0);
-    glClear(GL_COLOR_BUFFER_BIT);
-
-    glActiveTexture(GL_TEXTURE0);
-    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-}
-
-/**
-    Ends a composition step, re-binding the internal framebuffer
-*/
-void oglEndComposite() {
-    if (compositeScopeStack.length == 0) return;
-
-    auto frameState = compositeScopeStack[$ - 1];
-    compositeScopeStack.length -= 1;
-
-    immutable(GLenum[3]) attachments = [GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2];
-    glBindFramebuffer(GL_FRAMEBUFFER, frameState.framebuffer);
-    glViewport(frameState.viewport[0], frameState.viewport[1], frameState.viewport[2], frameState.viewport[3]);
-    glDrawBuffers(cast(GLsizei)attachments.length, attachments.ptr);
-
-    if (compositeScopeStack.length == 0) {
-        glFlush();
-        isCompositing = false;
-    }
 }
 /**
     Ends rendering to the framebuffer
@@ -3432,49 +2797,6 @@ void oglPostProcessScene() {
     
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
-
-/**
-    Add basic lighting shader to processing stack
-*/
-void oglAddBasicLightingPostProcess() {
-    postProcessingStack ~= PostProcessingShader(new Shader(LightingShaderSource));
-}
-
-/**
-    Clears the post processing stack
-*/
-ref PostProcessingShader[] oglGetPostProcessingStack() {
-    return postProcessingStack;
-}
-
-/**
-    Draw scene to area
-*/
-void oglDrawScene(vec4 area) {
-    float[] data = [
-        area.x,         area.y+area.w,          0, 0,
-        area.x,         area.y,                 0, 1,
-        area.x+area.z,  area.y+area.w,          1, 0,
-        
-        area.x+area.z,  area.y+area.w,          1, 0,
-        area.x,         area.y,                 0, 1,
-        area.x+area.z,  area.y,                 1, 1,
-    ];
-
-    glBindBuffer(GL_ARRAY_BUFFER, sceneVBO);
-    glBufferData(GL_ARRAY_BUFFER, 24*float.sizeof, data.ptr, GL_DYNAMIC_DRAW);
-    renderScene(area, basicSceneShader, fAlbedo, fEmissive, fBump);
-}
-
-void oglPrepareCompositeScene() {
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, cfAlbedo);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, cfEmissive);
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, cfBump);
-}
-
 /**
     Gets the nijilive framebuffer 
 
@@ -3483,25 +2805,6 @@ void oglPrepareCompositeScene() {
 GLuint oglGetFramebuffer() {
     return fBuffer;
 }
-
-/**
-    Gets the nijilive framebuffer render image
-
-    DO NOT MODIFY THIS IMAGE!
-*/
-GLuint oglGetRenderImage() {
-    return fAlbedo;
-}
-
-/**
-    Gets the nijilive composite render image
-
-    DO NOT MODIFY THIS IMAGE!
-*/
-GLuint oglGetCompositeImage() {
-    return cfAlbedo;
-}
-
 public GLuint oglGetCompositeFramebuffer() {
     return cfBuffer;
 }
@@ -3509,36 +2812,7 @@ public GLuint oglGetCompositeFramebuffer() {
 public GLuint oglGetBlendFramebuffer() {
     return blendFBO;
 }
-
-public GLuint oglGetMainEmissive() {
-    return fEmissive;
-}
-
-public GLuint oglGetMainBump() {
-    return fBump;
-}
-
-public GLuint oglGetCompositeEmissive() {
-    return cfEmissive;
-}
-
-public GLuint oglGetCompositeBump() {
-    return cfBump;
-}
-
-public GLuint oglGetBlendAlbedo() {
-    return blendAlbedo;
-}
-
-public GLuint oglGetBlendEmissive() {
-    return blendEmissive;
-}
-
-public GLuint oglGetBlendBump() {
-    return blendBump;
-}
-
-// Reattach the currently active main/composite textures to their FBOs.
+/// Reattach the currently active main/composite textures to their FBOs.
 public void oglRebindActiveTargets() {
     GLint prev;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev);
@@ -3557,25 +2831,9 @@ public void oglRebindActiveTargets() {
 
     glBindFramebuffer(GL_FRAMEBUFFER, prev);
 }
-
-/**
-    Gets the nijilive main albedo render image
-
-    DO NOT MODIFY THIS IMAGE!
-*/
-GLuint oglGetMainAlbedo() {
-    return fAlbedo;
-}
-
-/**
-    Gets the blend shader for the specified mode
-*/
-public void oglSwapMainCompositeBuffers() {
-    // No-op swap: we avoid ping-pong to keep attachments stable.
-}
 public
 void oglResizeViewport(int width, int height) {
-    version(InDoesRender) {
+    
         // Work on texture unit 0 to avoid “no texture bound” errors.
         glActiveTexture(GL_TEXTURE0);
         // Render Framebuffer
@@ -3656,25 +2914,12 @@ void oglResizeViewport(int width, int height) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
         glViewport(0, 0, width, height);
-    }
+    
 }
-
-/**
-    Dumps viewport data to texture stream
-*/
-public
-void oglDumpViewport(ref ubyte[] dumpTo, int width, int height) {
-    version(InDoesRender) {
-        if (width == 0 || height == 0) return;
-        glBindTexture(GL_TEXTURE_2D, fAlbedo);
-        glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, dumpTo.ptr);
-    }
-}
-
 // ---- source/nlshim/core/render/backends/opengl/shader_backend.d ----
 
 
-version (InDoesRender) {
+
 
 import bindbc.opengl;
 import std.exception;
@@ -3783,27 +3028,11 @@ void oglSetUniformMat4(int location, mat4 value) {
     glUniformMatrix4fv(location, 1, GL_TRUE, value.ptr);
 }
 
-} else {
 
-struct ShaderProgramHandle { }
-
-void oglCreateShaderProgram(ref ShaderProgramHandle handle, string vertex, string fragment) { }
-void oglDestroyShaderProgram(ref ShaderProgramHandle handle) { }
-void oglUseShaderProgram(ref ShaderProgramHandle handle) { }
-int oglShaderGetUniformLocation(ref ShaderProgramHandle handle, string name) { return -1; }
-void oglSetUniformBool(int, bool) { }
-void oglSetUniformInt(int, int) { }
-void oglSetUniformFloat(int, float) { }
-void oglSetUniformVec2(int, vec2) { }
-void oglSetUniformVec3(int, vec3) { }
-void oglSetUniformVec4(int, vec4) { }
-void oglSetUniformMat4(int, mat4) { }
-
-}
 
 // ---- source/nlshim/core/render/backends/opengl/soa_upload.d ----
 
-version (InDoesRender) {
+
 
 import bindbc.opengl;
 import std.traits : Unqual;
@@ -3832,11 +3061,7 @@ if (VecInfo!Vec.isValid) {
     glBufferData(GL_ARRAY_BUFFER, raw.length * float.sizeof, raw.ptr, usage);
 }
 
-} else {
 
-void glUploadFloatVecArray(Vec)(uint, auto ref Vec, uint) {}
-
-}
 
 // ---- source/nlshim/core/render/backends/opengl/texture_backend.d ----
 
@@ -3848,7 +3073,6 @@ mixin template TextureBackendStub() {
     void oglDeleteTextureHandle(ref GLId id) { id = 0; }
     void oglBindTextureHandle(GLId, uint) { }
     void oglUploadTextureData(GLId, int, int, int, int, bool, ubyte[]) { }
-    void oglUpdateTextureRegion(GLId, int, int, int, int, int, ubyte[]) { }
     void oglGenerateTextureMipmap(GLId) { }
     void oglApplyTextureFiltering(GLId, Filtering, bool = true) { }
     void oglApplyTextureWrapping(GLId, Wrapping) { }
@@ -3859,7 +3083,7 @@ mixin template TextureBackendStub() {
 
 version (unittest) {
     mixin TextureBackendStub;
-} else version (InDoesRender) {
+} else 
 
 import bindbc.opengl;
 import std.exception : enforce;
@@ -3913,13 +3137,6 @@ void oglUploadTextureData(GLId id, int width, int height, int inChannels, int ou
     auto outFormat = channelFormat(outChannels);
     glTexImage2D(GL_TEXTURE_2D, 0, outFormat, width, height, 0, inFormat, GL_UNSIGNED_BYTE, data.ptr);
 }
-
-void oglUpdateTextureRegion(GLId id, int x, int y, int width, int height, int channels, ubyte[] data) {
-    auto format = channelFormat(channels);
-    glBindTexture(GL_TEXTURE_2D, id);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, width, height, format, GL_UNSIGNED_BYTE, data.ptr);
-}
-
 void oglGenerateTextureMipmap(GLId id) {
     glBindTexture(GL_TEXTURE_2D, id);
     glGenerateMipmap(GL_TEXTURE_2D);
@@ -3969,11 +3186,7 @@ void oglReadTextureData(GLId id, int channels, bool stencil, ubyte[] buffer) {
     glGetTexImage(GL_TEXTURE_2D, 0, format, GL_UNSIGNED_BYTE, buffer.ptr);
 }
 
-} else {
 
-mixin TextureBackendStub;
-
-}
 
 // ---- source/nlshim/core/render/backends/package.d ----
 
@@ -4131,13 +3344,13 @@ version (UseQueueBackend) {
     enum bool SelectedBackendIsOpenGL = SelectedBackend == BackendEnum.OpenGL;
 }
 
-version (InDoesRender) {
+
     version (UseQueueBackend) {
     } else {
         version (RenderBackendDirectX12) {
         }
     }
-}
+
 
 version (UseQueueBackend) {
 } else {
@@ -4261,10 +3474,6 @@ class DynamicCompositePass {
     bool hasStencil;
 }
 
-bool tryMakeMaskApplyPacket(Drawable, bool, out MaskApplyPacket packet) { packet = MaskApplyPacket.init; return false; }
-
-CompositeDrawPacket makeCompositeDrawPacket(Composite) { CompositeDrawPacket packet; packet.valid = false; return packet; }
-
 // ---- source/nlshim/core/render/passes.d ----
 
 /// Render target scope kinds.
@@ -4278,31 +3487,6 @@ struct RenderScopeHint {
     RenderPassKind kind = RenderPassKind.Root;
     size_t token;
     bool skip;
-
-    static RenderScopeHint root() {
-        RenderScopeHint hint;
-        hint.kind = RenderPassKind.Root;
-        hint.token = 0;
-        hint.skip = false;
-        return hint;
-    }
-
-    static RenderScopeHint forDynamic(size_t token) {
-        if (token == 0 || token == size_t.max) return root();
-        RenderScopeHint hint;
-        hint.kind = RenderPassKind.DynamicComposite;
-        hint.token = token;
-        hint.skip = false;
-        return hint;
-    }
-
-    static RenderScopeHint skipHint() {
-        RenderScopeHint hint;
-        hint.kind = RenderPassKind.Root;
-        hint.token = 0;
-        hint.skip = true;
-        return hint;
-    }
 }
 
 // ---- source/nlshim/core/render/profiler.d ----
@@ -4403,11 +3587,6 @@ RenderProfileScope profileScope(string label) {
 void renderProfilerAddSampleUsec(string label, ulong usec) {
     profiler().addSample(label, dur!"usecs"(usec));
 }
-
-void renderProfilerFrameCompleted() {
-    profiler().frameCompleted();
-}
-
 } else {
 
 struct RenderProfileScope {
@@ -4420,9 +3599,6 @@ RenderProfileScope profileScope(string label) {
 }
 
 void renderProfilerAddSampleUsec(string, ulong) {}
-
-void renderProfilerFrameCompleted() {}
-
 }
 
 // ---- source/nlshim/core/render/shared_deform_buffer.d ----
@@ -4442,48 +3618,7 @@ private struct SharedVecAtlas {
     Binding[] bindings;
     size_t[Vec2Array*] lookup;
     bool dirty;
-
-    void registerArray(ref Vec2Array target, size_t* offsetSink) {
-        auto ptr = &target;
-        if (auto found = ptr in lookup) {
-            auto idx = *found;
-            bindings[idx].offsetSink = offsetSink;
-            return;
-        }
-        auto idx = bindings.length;
-        lookup[ptr] = idx;
-        bindings ~= Binding(ptr, offsetSink, target.length, 0);
-        rebuild();
-    }
-
-    void unregisterArray(ref Vec2Array target) {
-        auto ptr = &target;
-        if (auto found = ptr in lookup) {
-            auto idx = *found;
-            auto last = bindings.length - 1;
-            lookup.remove(ptr);
-            if (idx != last) {
-                bindings[idx] = bindings[last];
-                lookup[bindings[idx].target] = idx;
-            }
-            bindings.length = last;
-            rebuild();
-        }
-    }
-
-    void resizeArray(ref Vec2Array target, size_t newLength) {
-        auto ptr = &target;
-        if (auto found = ptr in lookup) {
-            auto idx = *found;
-            if (bindings[idx].length == newLength) {
-                return;
-            }
-            bindings[idx].length = newLength;
-            rebuild();
-        }
-    }
-
-    size_t stride() const {
+  size_t stride() const {
         return storage.length;
     }
 
@@ -4494,15 +3629,6 @@ private struct SharedVecAtlas {
     bool isDirty() const {
         return dirty;
     }
-
-    void markDirty() {
-        dirty = true;
-    }
-
-    void markUploaded() {
-        dirty = false;
-    }
-
 private:
     void rebuild() {
         size_t total = 0;
@@ -4563,102 +3689,6 @@ private __gshared {
     SharedVecAtlas uvAtlas;
 }
 
-public void sharedDeformRegister(ref Vec2Array target, size_t* offsetSink) {
-    deformAtlas.registerArray(target, offsetSink);
-}
-
-public void sharedDeformUnregister(ref Vec2Array target) {
-    deformAtlas.unregisterArray(target);
-}
-
-public void sharedDeformResize(ref Vec2Array target, size_t newLength) {
-    deformAtlas.resizeArray(target, newLength);
-}
-
-public size_t sharedDeformAtlasStride() {
-    return deformAtlas.stride();
-}
-
-public ref Vec2Array sharedDeformBufferData() {
-    return deformAtlas.data();
-}
-
-public bool sharedDeformBufferDirty() {
-    return deformAtlas.isDirty();
-}
-
-public void sharedDeformMarkDirty() {
-    deformAtlas.markDirty();
-}
-
-public void sharedDeformMarkUploaded() {
-    deformAtlas.markUploaded();
-}
-
-public void sharedVertexRegister(ref Vec2Array target, size_t* offsetSink) {
-    vertexAtlas.registerArray(target, offsetSink);
-}
-
-public void sharedVertexUnregister(ref Vec2Array target) {
-    vertexAtlas.unregisterArray(target);
-}
-
-public void sharedVertexResize(ref Vec2Array target, size_t newLength) {
-    vertexAtlas.resizeArray(target, newLength);
-}
-
-public size_t sharedVertexAtlasStride() {
-    return vertexAtlas.stride();
-}
-
-public ref Vec2Array sharedVertexBufferData() {
-    return vertexAtlas.data();
-}
-
-public bool sharedVertexBufferDirty() {
-    return vertexAtlas.isDirty();
-}
-
-public void sharedVertexMarkDirty() {
-    vertexAtlas.markDirty();
-}
-
-public void sharedVertexMarkUploaded() {
-    vertexAtlas.markUploaded();
-}
-
-public void sharedUvRegister(ref Vec2Array target, size_t* offsetSink) {
-    uvAtlas.registerArray(target, offsetSink);
-}
-
-public void sharedUvUnregister(ref Vec2Array target) {
-    uvAtlas.unregisterArray(target);
-}
-
-public void sharedUvResize(ref Vec2Array target, size_t newLength) {
-    uvAtlas.resizeArray(target, newLength);
-}
-
-public size_t sharedUvAtlasStride() {
-    return uvAtlas.stride();
-}
-
-public ref Vec2Array sharedUvBufferData() {
-    return uvAtlas.data();
-}
-
-public bool sharedUvBufferDirty() {
-    return uvAtlas.isDirty();
-}
-
-public void sharedUvMarkDirty() {
-    uvAtlas.markDirty();
-}
-
-public void sharedUvMarkUploaded() {
-    uvAtlas.markUploaded();
-}
-
 // ---- source/nlshim/core/render/support.d ----
 
 import inmath.linalg : Vector;
@@ -4700,21 +3730,14 @@ private bool inAdvancedBlendingCoherentAvailable;
 
 private auto blendBackend() { return currentRenderBackend(); }
 
-version (InDoesRender) {
+
     void setAdvancedBlendCoherent(bool enabled) { blendBackend().setAdvancedBlendCoherent(enabled); }
     void setLegacyBlendMode(BlendMode blendingMode) { blendBackend().setLegacyBlendMode(blendingMode); }
     void setAdvancedBlendEquation(BlendMode blendingMode) { blendBackend().setAdvancedBlendEquation(blendingMode); }
     void issueBlendBarrier() { blendBackend().issueBlendBarrier(); }
     bool hasAdvancedBlendSupport() { return blendBackend().supportsAdvancedBlend(); }
     bool hasAdvancedBlendCoherentSupport() { return blendBackend().supportsAdvancedBlendCoherent(); }
-} else {
-    void setAdvancedBlendCoherent(bool) { }
-    void setLegacyBlendMode(BlendMode) { }
-    void setAdvancedBlendEquation(BlendMode) { }
-    void issueBlendBarrier() { }
-    bool hasAdvancedBlendSupport() { return false; }
-    bool hasAdvancedBlendCoherentSupport() { return false; }
-}
+
 
 private void inApplyBlendingCapabilities() {
     bool desiredAdvanced = inAdvancedBlendingAvailable && !inForceTripleBufferFallback;
@@ -4730,26 +3753,6 @@ private void inApplyBlendingCapabilities() {
 
 private void inSetBlendModeLegacy(BlendMode blendingMode) {
     setLegacyBlendMode(blendingMode);
-}
-
-public bool inUseMultistageBlending(BlendMode blendingMode) {
-    if (inForceTripleBufferFallback) return false;
-    switch(blendingMode) {
-        case BlendMode.Normal,
-             BlendMode.LinearDodge,
-             BlendMode.AddGlow,
-             BlendMode.Subtract,
-             BlendMode.Inverse,
-             BlendMode.DestinationIn,
-             BlendMode.ClipToLower,
-             BlendMode.SliceFromLower:
-                 return false;
-        default: return inAdvancedBlending;
-    }
-}
-
-public void nlApplyBlendingCapabilities() {
-    inApplyBlendingCapabilities();
 }
 
 public void inInitBlending() {
@@ -4803,14 +3806,13 @@ public void inBlendModeBarrier(BlendMode mode) {
 
 
 public void incDrawableBindVAO() {
-    version (InDoesRender) {
+    
         currentRenderBackend().bindDrawableVao();
-    }
+    
 }
 
 private bool doGenerateBounds = false;
 public void inSetUpdateBounds(bool state) { doGenerateBounds = state; }
-public bool inGetUpdateBounds() { return doGenerateBounds; }
 
 // Minimal placeholders to satisfy type references after core/nodes removal.
 class Drawable {}
@@ -4859,31 +3861,6 @@ void inPopCamera() {
         inCamera.length = inCamera.length - 1;
     }
 }
-
-/// Current camera accessor (ensures at least one camera exists).
-Camera inGetCamera() {
-    if (inCamera.length == 0) {
-        inPushCamera(new Camera);
-    }
-    return inCamera[$-1];
-}
-
-/// Set the current camera, falling back to push if the stack is empty.
-void inSetCamera(Camera camera) {
-    if (inCamera.length == 0) {
-        inPushCamera(camera);
-    } else {
-        inCamera[$-1] = camera;
-    }
-}
-
-version(unittest)
-void inEnsureCameraStackForTests() {
-    if (inCamera.length == 0) {
-        inCamera ~= new Camera;
-    }
-}
-
 /// Push viewport dimensions and sync camera stack.
 void inPushViewport(int width, int height) {
     inViewportWidth ~= width;
@@ -4935,43 +3912,6 @@ void inGetViewport(out int width, out int height) {
     height = inViewportHeight[$-1];
 }
 
-version(unittest)
-void inEnsureViewportForTests(int width = 640, int height = 480) {
-    if (inViewportWidth.length == 0) {
-        inPushViewport(width, height);
-    }
-}
-
-/// Compute viewport data size (RGBA per pixel).
-size_t inViewportDataLength() {
-    return inViewportWidth[$-1] * inViewportHeight[$-1] * 4;
-}
-
-/// Dump current viewport pixels (common path, backend-provided grab).
-void inDumpViewport(ref ubyte[] dumpTo) {
-    auto width = inViewportWidth.length ? inViewportWidth[$-1] : 0;
-    auto height = inViewportHeight.length ? inViewportHeight[$-1] : 0;
-    auto required = width * height * 4;
-    enforce(dumpTo.length >= required, "Invalid data destination length for inDumpViewport");
-
-    requireRenderBackend().dumpViewport(dumpTo, width, height);
-
-    if (width == 0 || height == 0) return;
-    ubyte[] tmpLine = new ubyte[width * 4];
-    size_t ri = 0;
-    foreach_reverse(i; height/2 .. height) {
-        size_t lineSize = width * 4;
-        size_t oldLineStart = lineSize * ri;
-        size_t newLineStart = lineSize * i;
-
-        memcpy(tmpLine.ptr, dumpTo.ptr + oldLineStart, lineSize);
-        memcpy(dumpTo.ptr + oldLineStart, dumpTo.ptr + newLineStart, lineSize);
-        memcpy(dumpTo.ptr + newLineStart, tmpLine.ptr, lineSize);
-
-        ri++;
-    }
-}
-
 /// Clear color setter.
 void inSetClearColor(float r, float g, float b, float a) {
     inClearColor = vec4(r, g, b, a);
@@ -5001,146 +3941,6 @@ public RenderBackend currentRenderBackend() {
 }
 
 alias GLuint = uint;
-
-version(InDoesRender) {
-
-    private RenderBackend renderBackendOrNull() {
-        return tryRenderBackend();
-    }
-
-    private RenderResourceHandle handleOrZero(RenderResourceHandle value) {
-        return value;
-    }
-
-    RenderResourceHandle inGetRenderImage() {
-        auto backend = renderBackendOrNull();
-        return backend is null ? 0 : handleOrZero(backend.renderImageHandle());
-    }
-
-    RenderResourceHandle inGetFramebuffer() {
-        auto backend = renderBackendOrNull();
-        return backend is null ? 0 : handleOrZero(backend.framebufferHandle());
-    }
-
-    RenderResourceHandle inGetCompositeImage() { return 0; }
-
-    RenderResourceHandle inGetCompositeFramebuffer() { return 0; }
-
-    RenderResourceHandle inGetMainAlbedo() {
-        auto backend = renderBackendOrNull();
-        return backend is null ? 0 : handleOrZero(backend.mainAlbedoHandle());
-    }
-
-    RenderResourceHandle inGetMainEmissive() {
-        auto backend = renderBackendOrNull();
-        return backend is null ? 0 : handleOrZero(backend.mainEmissiveHandle());
-    }
-
-    RenderResourceHandle inGetMainBump() {
-        auto backend = renderBackendOrNull();
-        return backend is null ? 0 : handleOrZero(backend.mainBumpHandle());
-    }
-
-    RenderResourceHandle inGetCompositeEmissive() { return 0; }
-
-    RenderResourceHandle inGetCompositeBump() { return 0; }
-
-    RenderResourceHandle inGetBlendFramebuffer() {
-        auto backend = renderBackendOrNull();
-        return backend is null ? 0 : handleOrZero(backend.blendFramebufferHandle());
-    }
-
-    RenderResourceHandle inGetBlendAlbedo() {
-        auto backend = renderBackendOrNull();
-        return backend is null ? 0 : handleOrZero(backend.blendAlbedoHandle());
-    }
-
-    RenderResourceHandle inGetBlendEmissive() {
-        auto backend = renderBackendOrNull();
-        return backend is null ? 0 : handleOrZero(backend.blendEmissiveHandle());
-    }
-
-    RenderResourceHandle inGetBlendBump() {
-        auto backend = renderBackendOrNull();
-        return backend is null ? 0 : handleOrZero(backend.blendBumpHandle());
-    }
-} else {
-    RenderResourceHandle inGetRenderImage() { return 0; }
-    RenderResourceHandle inGetFramebuffer() { return 0; }
-    RenderResourceHandle inGetCompositeImage() { return 0; }
-    RenderResourceHandle inGetCompositeFramebuffer() { return 0; }
-    RenderResourceHandle inGetMainAlbedo() { return 0; }
-    RenderResourceHandle inGetMainEmissive() { return 0; }
-    RenderResourceHandle inGetMainBump() { return 0; }
-    RenderResourceHandle inGetCompositeEmissive() { return 0; }
-    RenderResourceHandle inGetCompositeBump() { return 0; }
-    RenderResourceHandle inGetBlendFramebuffer() { return 0; }
-    RenderResourceHandle inGetBlendAlbedo() { return 0; }
-    RenderResourceHandle inGetBlendEmissive() { return 0; }
-    RenderResourceHandle inGetBlendBump() { return 0; }
-}
-
-void inBeginScene() {
-    auto backend = tryRenderBackend();
-    if (backend !is null) backend.beginScene();
-}
-
-void inEndScene() {
-    auto backend = tryRenderBackend();
-    if (backend !is null) backend.endScene();
-}
-
-void inPostProcessScene() {
-    auto backend = tryRenderBackend();
-    if (backend !is null) backend.postProcessScene();
-}
-
-void inPostProcessingAddBasicLighting() {
-    auto backend = tryRenderBackend();
-    if (backend !is null) backend.addBasicLightingPostProcess();
-}
-
-public
-void initRendererCommon() {
-    inPushViewport(0, 0);
-
-    inInitBlending();
-
-
-    inSetClearColor(0, 0, 0, 0);
-}
-
-public
-void initRenderer() {
-    initRendererCommon();
-    requireRenderBackend().initializeRenderer();
-}
-
-void inSetDifferenceAggregationEnabled(bool enabled) {
-    // diff aggregation not supported in this build
-}
-
-bool inIsDifferenceAggregationEnabled() {
-    return false;
-}
-
-void inSetDifferenceAggregationRegion(int x, int y, int width, int height) {
-    // no-op
-}
-
-DifferenceEvaluationRegion inGetDifferenceAggregationRegion() {
-    return DifferenceEvaluationRegion.init;
-}
-
-bool inEvaluateDifferenceAggregation(RenderResourceHandle texture, int viewportWidth, int viewportHeight) {
-    return false;
-}
-
-bool inFetchDifferenceAggregationResult(out DifferenceEvaluationResult result) {
-    result = DifferenceEvaluationResult.init;
-    return false;
-}
-
 // ---- source/nlshim/core/shader.d ----
 /*
     Copyright © 2020, Inochi2D Project
@@ -5149,8 +3949,8 @@ bool inFetchDifferenceAggregationResult(out DifferenceEvaluationResult result) {
     
     Authors: Luna Nielsen
 */
-version (InDoesRender) {
-}
+
+
 
 struct ShaderStageSource {
     string vertex;
@@ -5203,24 +4003,24 @@ public:
         Destructor
     */
     ~this() {
-        version (InDoesRender) {
+        
             if (handle is null) return;
             auto backend = tryRenderBackend();
             if (backend !is null) {
                 backend.destroyShader(handle);
             }
             handle = null;
-        }
+        
     }
 
     /**
         Creates a new shader object from source definitions
     */
     this(ShaderAsset sources) {
-        version (InDoesRender) {
+        
             auto variant = sources.sourceForCurrentBackend();
             handle = currentRenderBackend().createShader(variant.vertex, variant.fragment);
-        }
+        
     }
 
     /**
@@ -5234,67 +4034,67 @@ public:
         Use the shader
     */
     void use() {
-        version (InDoesRender) {
+        
             if (handle is null) return;
             currentRenderBackend().useShader(handle);
-        }
+        
     }
 
     int getUniformLocation(string name) {
-        version (InDoesRender) {
+        
             if (handle is null) return -1;
             return currentRenderBackend().getShaderUniformLocation(handle, name);
-        }
+        
         return -1;
     }
 
     void setUniform(int uniform, bool value) {
-        version (InDoesRender) {
+        
             if (handle is null) return;
             currentRenderBackend().setShaderUniform(handle, uniform, value);
-        }
+        
     }
 
     void setUniform(int uniform, int value) {
-        version (InDoesRender) {
+        
             if (handle is null) return;
             currentRenderBackend().setShaderUniform(handle, uniform, value);
-        }
+        
     }
 
     void setUniform(int uniform, float value) {
-        version (InDoesRender) {
+        
             if (handle is null) return;
             currentRenderBackend().setShaderUniform(handle, uniform, value);
-        }
+        
     }
 
     void setUniform(int uniform, vec2 value) {
-        version (InDoesRender) {
+        
             if (handle is null) return;
             currentRenderBackend().setShaderUniform(handle, uniform, value);
-        }
+        
     }
 
     void setUniform(int uniform, vec3 value) {
-        version (InDoesRender) {
+        
             if (handle is null) return;
             currentRenderBackend().setShaderUniform(handle, uniform, value);
-        }
+        
     }
 
     void setUniform(int uniform, vec4 value) {
-        version (InDoesRender) {
+        
             if (handle is null) return;
             currentRenderBackend().setShaderUniform(handle, uniform, value);
-        }
+        
     }
 
     void setUniform(int uniform, mat4 value) {
-        version (InDoesRender) {
+        
             if (handle is null) return;
             currentRenderBackend().setShaderUniform(handle, uniform, value);
-        }
+        
     }
 }
 
@@ -5314,8 +4114,8 @@ import std.exception;
 import std.format;
 import imagefmt;
 import std.algorithm : clamp;
-version (InDoesRender) {
-}
+
+
 
 /**
     A texture which is not bound to an OpenGL context
@@ -5431,22 +4231,6 @@ public:
         this.channels = channels;
         this.convChannels = convChannels;
     }
-
-    /**
-        Saves image
-    */
-    void save(string file) {
-        import std.file : write;
-        import core.stdc.stdlib : free;
-        int e;
-        ubyte[] sData = write_image_mem(IF_PNG, this.width, this.height, this.data, channels, e);
-        enforce(!e, "%s".format(IF_ERROR[e]));
-
-        write(file, sData);
-
-        // Make sure we free the buffer
-        free(sData.ptr);
-    }
 }
 
 /**
@@ -5523,7 +4307,7 @@ public:
         this.stencil_ = stencil;
         this.useMipmaps_ = useMipmaps;
 
-        version (InDoesRender) {
+        
             auto backend = currentRenderBackend();
             handle = backend.createTextureHandle();
             this.setData(data, inChannels);
@@ -5531,7 +4315,7 @@ public:
             this.setFiltering(Filtering.Linear);
             this.setWrapping(Wrapping.Clamp);
             this.setAnisotropy(incGetMaxAnisotropy()/2.0f);
-        }
+        
         uuid = 0;
     }
 
@@ -5582,37 +4366,30 @@ public:
     }
 
     /**
-        Returns runtime UUID for texture
-    */
-    uint getRuntimeUUID() {
-        return uuid;
-    }
-
-    /**
         Set the filtering mode used for the texture
     */
     void setFiltering(Filtering filtering) {
-        version (InDoesRender) {
+        
             if (handle is null) return;
             currentRenderBackend().applyTextureFiltering(handle, filtering, useMipmaps_);
-        }
+        
     }
 
     void setAnisotropy(float value) {
-        version (InDoesRender) {
+        
             if (handle is null) return;
             currentRenderBackend().applyTextureAnisotropy(handle, clamp(value, 1, incGetMaxAnisotropy()));
-        }
+        
     }
 
     /**
         Set the wrapping mode used for the texture
     */
     void setWrapping(Wrapping wrapping) {
-        version (InDoesRender) {
+        
             if (handle is null) return;
             currentRenderBackend().applyTextureWrapping(handle, wrapping);
-        }
+        
     }
 
     /**
@@ -5624,11 +4401,11 @@ public:
             lockedData = data;
             modified = true;
         } else {
-            version (InDoesRender) {
+            
                 if (handle is null) return;
                 currentRenderBackend().uploadTextureData(handle, width_, height_, actualChannels, channels_, stencil_, data);
                 this.genMipmap();
-            }
+            
         }
     }
 
@@ -5636,29 +4413,11 @@ public:
         Generate mipmaps
     */
     void genMipmap() {
-        version (InDoesRender) {
+        
             if (!stencil_ && handle !is null && useMipmaps_) {
                 currentRenderBackend().generateTextureMipmap(handle);
             }
-        }
-    }
-
-    /**
-        Sets a region of a texture to new data
-    */
-    void setDataRegion(ubyte[] data, int x, int y, int width, int height, int channels = -1) {
-        auto actualChannels = channels == -1 ? this.channels_ : channels;
-
-        // Make sure we don't try to change the texture in an out of bounds area.
-        enforce( x >= 0 && x+width <= this.width_, "x offset is out of bounds (xoffset=%s, xbound=%s)".format(x+width, this.width_));
-        enforce( y >= 0 && y+height <= this.height_, "y offset is out of bounds (yoffset=%s, ybound=%s)".format(y+height, this.height_));
-
-        version (InDoesRender) {
-            if (handle is null) return;
-            currentRenderBackend().updateTextureRegion(handle, x, y, width, height, actualChannels, data);
-        }
-
-        this.genMipmap();
+        
     }
 
     /**
@@ -5670,30 +4429,23 @@ public:
     */
     void bind(uint unit = 0) {
         assert(unit <= 31u, "Outside maximum texture unit value");
-        version (InDoesRender) {
+        
             if (handle is null) return;
             currentRenderBackend().bindTextureHandle(handle, unit);
-        }
+        
     }
 
     /**
         Gets this texture's native GPU handle (legacy compatibility with OpenGL ID users)
     */
     uint getTextureId() {
-        version (InDoesRender) {
+        
             if (handle is null) return 0;
             auto backend = tryRenderBackend();
             if (backend is null) return 0;
             return cast(uint)backend.textureNativeHandle(handle);
-        }
+        
         return 0;
-    }
-
-    /**
-        Saves the texture to file
-    */
-    void save(string file) {
-        write_image(file, width, height, getTextureData(true), channels_);
     }
 
     /**
@@ -5704,10 +4456,10 @@ public:
             return lockedData;
         } else {
             ubyte[] buf = new ubyte[width*height*channels_];
-            version (InDoesRender) {
+            
                 if (handle is null) return buf;
                 currentRenderBackend().readTextureData(handle, channels_, stencil_, buf);
-            }
+            
             if (unmultiply && channels == 4) {
                 inTexUnPremuliply(buf);
             }
@@ -5719,12 +4471,12 @@ public:
         Disposes texture from GL
     */
     void dispose() {
-        version (InDoesRender) {
+        
             if (handle is null) return;
             auto backend = tryRenderBackend();
             if (backend !is null) backend.destroyTextureHandle(handle);
             handle = null;
-        }
+        
         version (UseQueueBackend) {
             if (externalHandle && ngReleaseExternalHandle !is null) {
                 ngReleaseExternalHandle(externalHandle);
@@ -5739,9 +4491,6 @@ public:
 
     /// Unity/queue backend: allow external handle injection.
     version (UseQueueBackend) {
-        void setExternalHandle(size_t h) {
-            externalHandle = h;
-        }
 
         size_t getExternalHandle() const {
             return externalHandle;
@@ -5752,24 +4501,6 @@ public:
         auto result = new Texture(width_, height_, channels_, stencil_);
         result.setData(getTextureData(), channels_);
         return result;
-    }
-
-    void lock() {
-        if (!locked) {
-            lockedData = getTextureData();
-            modified = false;
-            locked = true;
-        }
-    }
-
-    void unlock() {
-        if (locked) {
-            locked = false;
-            if (modified)
-                setData(lockedData, channels_);
-            modified = false;
-            lockedData = null;
-        }
     }
 }
 private enum int LegacyGLRed = 0x1903;
@@ -5795,66 +4526,14 @@ private {
     Gets the maximum level of anisotropy
 */
 float incGetMaxAnisotropy() {
-    version (InDoesRender) {
+    
         auto backend = tryRenderBackend();
         if (backend !is null) {
             return backend.maxTextureAnisotropy();
         }
-    }
+    
     return 1;
 }
-
-/**
-    Begins a texture loading pass
-*/
-void inBeginTextureLoading() {
-    enforce(!started, "Texture loading pass already started!");
-    started = true;
-}
-
-/**
-    Returns a texture from the internal texture list
-*/
-Texture inGetTextureFromId(uint id) {
-    enforce(started, "Texture loading pass not started!");
-    return textureBindings[cast(size_t)id];
-}
-
-/**
-    Gets the latest texture from the internal texture list
-*/
-Texture inGetLatestTexture() {
-    return textureBindings[$-1];
-}
-
-/**
-    Adds binary texture
-*/
-void inAddTextureBinary(ShallowTexture data) {
-    textureBindings ~= new Texture(data);
-}
-
-/**
-    Ends a texture loading pass
-*/
-void inEndTextureLoading(bool checkErrors=true)() {
-    static if (checkErrors) enforce(started, "Texture loading pass not started!");
-    started = false;
-    textureBindings.length = 0;
-}
-
-void inTexPremultiply(ref ubyte[] data, int channels = 4) {
-    if (channels < 4) return;
-
-    foreach(i; 0..data.length/channels) {
-
-        size_t offsetPixel = (i*channels);
-        data[offsetPixel+0] = cast(ubyte)((cast(int)data[offsetPixel+0] * cast(int)data[offsetPixel+3])/255);
-        data[offsetPixel+1] = cast(ubyte)((cast(int)data[offsetPixel+1] * cast(int)data[offsetPixel+3])/255);
-        data[offsetPixel+2] = cast(ubyte)((cast(int)data[offsetPixel+2] * cast(int)data[offsetPixel+3])/255);
-    }
-}
-
 void inTexUnPremuliply(ref ubyte[] data) {
     foreach(i; 0..data.length/4) {
         if (data[((i*4)+3)] == 0) continue;
@@ -5922,11 +4601,6 @@ public:
         return vec2(cast(float)width/scale.x, cast(float)height/scale.y);
     }
 
-    vec2 getCenterOffset() {
-        vec2 realSize = getRealSize();
-        return realSize/2;
-    }
-
     /**
         Matrix for this camera
 
@@ -5968,47 +4642,6 @@ public import inmath.linalg;
 public import inmath.math;
 public import std.math : isNaN;
 public import inmath.interpolate;
-
-// transform removed
-
-// Unsigned short vectors
-
-/**
-    Smoothly dampens from a position to a target
-*/
-V dampen(V)(V pos, V target, double delta, double speed = 1) if(isVector!V) {
-    return (pos - target) * pow(0.001, delta*speed) + target;
-}
-
-/**
-    Smoothly dampens from a position to a target
-*/
-float dampen(float pos, float target, double delta, double speed = 1) {
-    return (pos - target) * pow(0.001, delta*speed) + target;
-}
-
-/**
-    Gets whether a point is within an axis aligned rectangle
-*/
-bool contains(vec4 a, vec2 b) {
-    return  b.x >= a.x && 
-            b.y >= a.y &&
-            b.x <= a.x+a.z &&
-            b.y <= a.y+a.w;
-}
-
-/**
-    Checks if 2 lines segments are intersecting
-*/
-bool areLineSegmentsIntersecting(vec2 p1, vec2 p2, vec2 p3, vec2 p4) {
-    float epsilon = 0.00001f;
-    float demoninator = (p4.y - p3.y) * (p2.x - p1.x) - (p4.x - p3.x) * (p2.y - p1.y);
-    if (demoninator == 0) return false;
-
-    float uA = ((p4.x - p3.x) * (p1.y - p3.y) - (p4.y - p3.y) * (p1.x - p3.x)) / demoninator;
-    float uB = ((p2.x - p1.x) * (p1.y - p3.y) - (p2.y - p1.y) * (p1.x - p3.x)) / demoninator;
-    return (uA > 0+epsilon && uA < 1-epsilon && uB > 0+epsilon && uB < 1-epsilon);
-}
 
 // ---- source/nlshim/math/simd.d ----
 
@@ -6725,38 +5358,6 @@ unittest {
 // ---- source/nlshim/math/veca_ops.d ----
 
 import std.algorithm : min;
-
-private void simdLinearCombination(bool accumulate)(
-    float[] dst,
-    const float[] lhs,
-    const float[] rhs,
-    float lhsCoeff,
-    float rhsCoeff,
-    float bias) {
-    assert(dst.length == lhs.length && lhs.length == rhs.length);
-    auto len = dst.length;
-    auto lhsVec = splatSimd(lhsCoeff);
-    auto rhsVec = splatSimd(rhsCoeff);
-    auto biasVec = splatSimd(bias);
-    size_t i = 0;
-    for (; i + simdWidth <= len; i += simdWidth) {
-        auto l = loadVec(lhs, i);
-        auto r = loadVec(rhs, i);
-        auto value = lhsVec * l + rhsVec * r + biasVec;
-        static if (accumulate) {
-            value += loadVec(dst, i);
-        }
-        storeVec(dst, i, value);
-    }
-    for (; i < len; ++i) {
-        auto scalar = lhsCoeff * lhs[i] + rhsCoeff * rhs[i] + bias;
-        static if (accumulate)
-            dst[i] += scalar;
-        else
-            dst[i] = scalar;
-    }
-}
-
 private void simdBlendAxes(
     float[] dst,
     const float[] base,
@@ -6911,48 +5512,6 @@ package(opengl) void rotateVec2TangentsToNormals(
     auto srcX = tangents.lane(0)[0 .. len];
     auto srcY = tangents.lane(1)[0 .. len];
     rotateAxesSimd(dstX, dstY, srcX, srcY);
-}
-
-/// Writes `matrix * src` into `dest`, applying the translational part.
-void transformAssign(ref Vec2Array dest, const Vec2Array src, const mat4 matrix) {
-    dest.length = src.length;
-    auto len = src.length;
-    if (len == 0) return;
-
-    const float m00 = matrix[0][0];
-    const float m01 = matrix[0][1];
-    const float m03 = matrix[0][3];
-    const float m10 = matrix[1][0];
-    const float m11 = matrix[1][1];
-    const float m13 = matrix[1][3];
-
-    auto srcX = src.lane(0)[0 .. len];
-    auto srcY = src.lane(1)[0 .. len];
-    auto dstX = dest.lane(0)[0 .. len];
-    auto dstY = dest.lane(1)[0 .. len];
-
-    simdLinearCombination!false(dstX, srcX, srcY, m00, m01, m03);
-    simdLinearCombination!false(dstY, srcX, srcY, m10, m11, m13);
-}
-
-/// Adds the linear part of `matrix * src` into `dest` (no translation).
-void transformAdd(ref Vec2Array dest, const Vec2Array src, const mat4 matrix, size_t count = size_t.max) {
-    if (dest.length == 0 || src.length == 0) return;
-    auto len = min(count, min(dest.length, src.length));
-    if (len == 0) return;
-
-    const float m00 = matrix[0][0];
-    const float m01 = matrix[0][1];
-    const float m10 = matrix[1][0];
-    const float m11 = matrix[1][1];
-
-    auto srcX = src.lane(0)[0 .. len];
-    auto srcY = src.lane(1)[0 .. len];
-    auto dstX = dest.lane(0)[0 .. len];
-    auto dstY = dest.lane(1)[0 .. len];
-
-    simdLinearCombination!true(dstX, srcX, srcY, m00, m01, 0);
-    simdLinearCombination!true(dstY, srcX, srcY, m10, m11, 0);
 }
 
 // ---- source/nlshim/ver.d ----
