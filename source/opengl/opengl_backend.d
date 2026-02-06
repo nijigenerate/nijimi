@@ -1180,16 +1180,6 @@ void oglDrawDrawableElements(RenderResourceHandle ibo, size_t indexCount) {
 
 
 import bindbc.opengl;
-version (NijiliveRenderProfiler) {
-    import std.stdio : writefln;
-    import std.format : format;
-}
-version (NijiliveRenderProfiler) {
-    import core.time : MonoTime;
-
-    __gshared ulong gCompositeCpuAccumUsec;
-    __gshared ulong gCompositeGpuAccumUsec;
-}
 
 private GLuint textureId(Texture texture) {
     if (texture is null) return 0;
@@ -1223,19 +1213,6 @@ private {
         writefln("[dc-err] %s glError=%s", tag, err);
     }
 
-    version (NijiliveRenderProfiler) {
-        GLuint compositeTimeQuery;
-        bool compositeTimerInit;
-        bool compositeTimerActive;
-        MonoTime compositeCpuStart;
-        bool compositeCpuActive;
-
-        void ensureCompositeTimer() {
-            if (compositeTimerInit) return;
-            compositeTimerInit = true;
-            glGenQueries(1, &compositeTimeQuery);
-        }
-    }
 }
 
 // ---- source/nlshim/core/render/backends/opengl/handles.d ----
@@ -1882,21 +1859,17 @@ class RenderingBackend(BackendEnum backendType : BackendEnum.OpenGL) {
 
     void beginDynamicComposite(DynamicCompositePass pass) {
         if (pass is null) {
-            debug (NijiliveRenderProfiler) writefln("[nijilive] oglBeginDynamicComposite skip: pass=null");
             return;
         }
         auto surface = pass.surface;
         if (surface is null) {
-            debug (NijiliveRenderProfiler) writefln("[nijilive] oglBeginDynamicComposite skip: surface=null");
             return;
         }
         if (surface.textureCount == 0) {
-            debug (NijiliveRenderProfiler) writefln("[nijilive] oglBeginDynamicComposite skip: textureCount=0");
             return;
         }
         auto tex = surface.textures[0];
         if (tex is null) {
-            debug (NijiliveRenderProfiler) writefln("[nijilive] oglBeginDynamicComposite skip: tex[0]=null");
             return;
         }
 
@@ -1954,37 +1927,15 @@ class RenderingBackend(BackendEnum backendType : BackendEnum.OpenGL) {
         logGlErr("clear offscreen");
         glActiveTexture(GL_TEXTURE0);
         glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-        debug (NijiliveRenderProfiler) {
-            auto beginMsg = format(
-                "[nijilive] oglBeginDynamicComposite fbo=%s tex0=%s size=%sx%s scale=%s rotZ=%s autoScaled=%s origFbo=%s origViewport=%s,%s,%s,%s cameraPos=%s cameraScale=%s cameraRot=%s",
-                surface.framebuffer, textureId(tex), tex.width, tex.height,
-                pass.scale, pass.rotationZ, pass.autoScaled,
-                pass.origBuffer, pass.origViewport[0], pass.origViewport[1], pass.origViewport[2], pass.origViewport[3],
-                camera.position, camera.scale, camera.rotation);
-            writefln(beginMsg);
-        }
 
         logFboState("post-begin");
-        version (NijiliveRenderProfiler) {
-            if (!compositeCpuActive) {
-                compositeCpuActive = true;
-                compositeCpuStart = MonoTime.currTime;
-            }
-            ensureCompositeTimer();
-            if (!compositeTimerActive && compositeTimeQuery != 0) {
-                glBeginQuery(GL_TIME_ELAPSED, compositeTimeQuery);
-                compositeTimerActive = true;
-            }
-        }
     }
 
     void endDynamicComposite(DynamicCompositePass pass) {
         if (pass is null) {
-            debug (NijiliveRenderProfiler) writefln("[nijilive] oglEndDynamicComposite skip: pass=null");
             return;
         }
         if (pass.surface is null) {
-            debug (NijiliveRenderProfiler) writefln("[nijilive] oglEndDynamicComposite skip: surface=null");
             return;
         }
 
@@ -2007,29 +1958,6 @@ class RenderingBackend(BackendEnum backendType : BackendEnum.OpenGL) {
         }
         logGlErr("restore draw buffers");
         logFboState("post-end");
-        debug (NijiliveRenderProfiler) {
-            auto endMsg = format(
-                "[nijilive] oglEndDynamicComposite restore origFbo=%s viewport=%s,%s,%s,%s autoScaled=%s",
-                pass.origBuffer, pass.origViewport[0], pass.origViewport[1], pass.origViewport[2], pass.origViewport[3],
-                pass.autoScaled);
-            writefln(endMsg);
-        }
-        version (NijiliveRenderProfiler) {
-            if (compositeTimerActive && compositeTimeQuery != 0) {
-                glEndQuery(GL_TIME_ELAPSED);
-                ulong ns = 0;
-                glGetQueryObjectui64v(compositeTimeQuery, GL_QUERY_RESULT, &ns);
-                renderProfilerAddSampleUsec("Composite.Offscreen", ns / 1000);
-                gCompositeGpuAccumUsec += ns / 1000;
-                compositeTimerActive = false;
-            }
-            if (compositeCpuActive) {
-                auto elapsedUsec = cast(ulong)(MonoTime.currTime - compositeCpuStart).total!"usecs";
-                renderProfilerAddSampleUsec("Composite.Offscreen.CPU", elapsedUsec);
-                gCompositeCpuAccumUsec += elapsedUsec;
-                compositeCpuActive = false;
-            }
-        }
     }
 
     void beginMask(bool useStencil) {
@@ -2840,10 +2768,6 @@ if (VecInfo!Vec.isValid) {
     if (buffer == 0 || data.length == 0) return;
     auto raw = data.rawStorage();
     if (raw.length == 0) return;
-    RenderProfileScope profScope = RenderProfileScope.init;
-    if (profileLabel.length) {
-        profScope = profileScope(profileLabel);
-    }
     glBindBuffer(GL_ARRAY_BUFFER, buffer);
     glBufferData(GL_ARRAY_BUFFER, raw.length * float.sizeof, raw.ptr, usage);
 }
@@ -3180,118 +3104,6 @@ struct RenderScopeHint {
     RenderPassKind kind = RenderPassKind.Root;
     size_t token;
     bool skip;
-}
-
-// ---- source/nlshim/core/render/profiler.d ----
-
-version (NijiliveRenderProfiler) {
-
-import core.time : MonoTime, Duration, seconds, dur;
-import std.algorithm : sort;
-import std.array : array;
-import std.format : format;
-import std.stdio : writeln;
-
-private class RenderProfiler {
-    long[string] accumUsec;
-    size_t[string] callCounts;
-    MonoTime lastReport = MonoTime.init;
-    size_t frameCount;
-
-    void addSample(string label, Duration sample) {
-        accumUsec[label] += sample.total!"usecs";
-        callCounts[label] += 1;
-    }
-
-    void frameCompleted() {
-        frameCount++;
-        auto now = MonoTime.currTime;
-        if (lastReport == MonoTime.init) {
-            lastReport = now;
-            return;
-        }
-        auto elapsed = now - lastReport;
-        if (elapsed >= 1.seconds) {
-            report(elapsed);
-            accumUsec = typeof(accumUsec).init;
-            callCounts = typeof(callCounts).init;
-            frameCount = 0;
-            lastReport = now;
-        }
-    }
-
-private:
-    void report(Duration interval) {
-        double secondsElapsed = interval.total!"usecs" / 1_000_000.0;
-            writeln(format!"[RenderProfiler] %.3fs window (%s frames)"(
-                secondsElapsed, frameCount));
-        auto entries = accumUsec.byKeyValue.array;
-        sort!((a, b) => a.value > b.value)(entries);
-        foreach (entry; entries) {
-            double totalMs = entry.value / 1000.0;
-            auto count = entry.key in callCounts ? callCounts[entry.key] : 0;
-            double avgMs = count ? totalMs / cast(double)count : totalMs;
-            double perFrameMs = frameCount ? totalMs / cast(double)frameCount : totalMs;
-            writeln(format!"  %-18s total=%8.3f ms  avg=%6.3f ms  perFrame=%6.3f ms  calls=%6s"(
-                entry.key, totalMs, avgMs, perFrameMs, count));
-        }
-        if (entries.length == 0) {
-            writeln("  (no instrumented passes recorded)");
-        }
-    }
-}
-
-private RenderProfiler profiler() {
-    static __gshared RenderProfiler instance;
-    if (instance is null) {
-        instance = new RenderProfiler();
-    }
-    return instance;
-}
-
-struct RenderProfileScope {
-    private string label;
-    private MonoTime start;
-    private bool active;
-
-    this(string label) {
-        this.label = label;
-        start = MonoTime.currTime;
-        active = true;
-    }
-
-    void stop() {
-        if (!active || label.length == 0) return;
-        auto duration = MonoTime.currTime - start;
-        profiler().addSample(label, duration);
-        active = false;
-    }
-
-    ~this() {
-        stop();
-    }
-}
-
-RenderProfileScope profileScope(string label) {
-    return RenderProfileScope(label);
-}
-
-/// Add a sampled duration in microseconds (e.g., GPU timer results).
-void renderProfilerAddSampleUsec(string label, ulong usec) {
-    profiler().addSample(label, dur!"usecs"(usec));
-}
-} else {
-
-struct RenderProfileScope {
-    this(string) {}
-    void stop() {}
-}
-
-RenderProfileScope profileScope(string label) {
-    return RenderProfileScope(label);
-}
-
-void renderProfilerAddSampleUsec(string, ulong) {}
 }
 
 // ---- source/nlshim/core/render/shared_deform_buffer.d ----
