@@ -17,7 +17,7 @@ import bindbc.sdl;
 import ogl = opengl.opengl_backend;
 import opengl.opengl_backend : NjgResult, UnityRendererConfig, UnityResourceCallbacks, RendererHandle, PuppetHandle, FrameConfig, CommandQueueView, SharedBufferSnapshot;
 import opengl.opengl_backend : initOpenGLBackend, OpenGLBackendInit;
-import opengl.opengl_backend : oglResizeViewport;
+import opengl.opengl_backend : currentRenderBackend;
 import core.runtime : Runtime;
 import opengl.opengl_backend : inSetUpdateBounds;
 import opengl.opengl_backend : inSetViewport;
@@ -195,7 +195,7 @@ void main(string[] args) {
     frameCfg.viewportWidth = glInit.drawableW;
     frameCfg.viewportHeight = glInit.drawableH;
     inSetViewport(glInit.drawableW, glInit.drawableH);
-    oglResizeViewport(glInit.drawableW, glInit.drawableH);
+    currentRenderBackend().resizeViewportTargets(glInit.drawableW, glInit.drawableH);
     float puppetScale = 0.12f;
 
     // Apply initial scale (default 0.25) so that the view starts zoomed out.
@@ -226,7 +226,7 @@ void main(string[] args) {
                         frameCfg.viewportWidth = glInit.drawableW;
                         frameCfg.viewportHeight = glInit.drawableH;
                         inSetViewport(glInit.drawableW, glInit.drawableH);
-                        oglResizeViewport(glInit.drawableW, glInit.drawableH);
+                        currentRenderBackend().resizeViewportTargets(glInit.drawableW, glInit.drawableH);
                     }
                     break;
                 case SDL_MOUSEWHEEL:
