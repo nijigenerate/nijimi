@@ -19,7 +19,6 @@ import opengl.opengl_backend : NjgResult, UnityRendererConfig, UnityResourceCall
 import opengl.opengl_backend : initOpenGLBackend, OpenGLBackendInit;
 import opengl.opengl_backend : currentRenderBackend;
 import core.runtime : Runtime;
-import opengl.opengl_backend : inSetUpdateBounds;
 enum MaskDrawableKind : uint { Part, Mask }
 
 extern(C) alias NjgLogFn = void function(const(char)* message, size_t length, void* userData);
@@ -177,8 +176,6 @@ void main(string[] args) {
     if (api.rtInit !is null) api.rtInit();
     scope (exit) if (api.rtTerm !is null) api.rtTerm();
     api.setLogCallback(&logCallback, null);
-    // Queue backend needs bounds generation enabled; otherwise bounds stay NaN and offscreen targets fail.
-    inSetUpdateBounds(true);
 
     UnityRendererConfig rendererCfg;
     rendererCfg.viewportWidth = glInit.drawableW;
