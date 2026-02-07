@@ -443,6 +443,7 @@ private:
     bool maskBuildActive;
     bool maskContentActive;
     bool maskStencilAvailable;
+    bool maskStencilWritten;
     bool pendingMaskStencilClear;
     uint32_t pendingMaskStencilClearValue = 1;
     uint32_t pendingMaskWriteReference = 1;
@@ -570,6 +571,7 @@ public:
         maskBuildActive = false;
         maskContentActive = false;
         maskStencilAvailable = false;
+        maskStencilWritten = false;
         pendingMaskStencilClear = false;
         pendingMaskStencilClearValue = 1;
         pendingMaskWriteReference = 1;
@@ -594,8 +596,16 @@ public:
         }
         maskBuildActive = true;
         maskContentActive = false;
+        maskStencilWritten = false;
         pendingMaskStencilClear = true;
         pendingMaskStencilClearValue = useStencil ? 0 : 1;
+        // Ensure stencil is cleared even if no mask geometry is emitted.
+        DrawBatch clearOnly;
+        clearOnly.targetHandle = (activeTargetCount > 0) ? activeTargetHandles[0] : 0;
+        clearOnly.clearStencil = true;
+        clearOnly.clearStencilValue = pendingMaskStencilClearValue;
+        batches ~= clearOnly;
+        pendingMaskStencilClear = false;
     }
 
     void applyMask(ref const(NjgMaskApplyPacket) packet, Texture[size_t] texturesByHandle) {
@@ -614,6 +624,12 @@ public:
             maskContentActive = false;
             return;
         }
+        if (!maskStencilWritten) {
+            // Avoid clipping everything when no mask geometry was actually written.
+            maskBuildActive = false;
+            maskContentActive = false;
+            return;
+        }
         maskBuildActive = false;
         maskContentActive = true;
     }
@@ -622,6 +638,7 @@ public:
         maskBuildActive = false;
         maskContentActive = false;
         maskStencilAvailable = false;
+        maskStencilWritten = false;
         pendingMaskStencilClear = false;
     }
 
@@ -736,12 +753,13 @@ public:
 
             if (maskBuildActive) {
                 auto b = base;
-                b.pipelineKind = packet.isMask ? PipelineKind.PartMaskStencilWrite : PipelineKind.PartStencilWrite;
+                b.pipelineKind = PipelineKind.PartStencilWrite;
                 b.blendMode = BlendMode.Normal;
                 b.clearStencil = pendingMaskStencilClear;
                 b.clearStencilValue = pendingMaskStencilClearValue;
                 b.stencilReference = pendingMaskWriteReference;
                 pendingMaskStencilClear = false;
+                maskStencilWritten = true;
                 auto t = (activeTargetCount > 0) ? activeTargetHandles[0] : 0;
                 pushToTarget(b, t);
             } else if (packet.isMask) {
@@ -816,6 +834,7 @@ public:
                 b.clearStencilValue = pendingMaskStencilClearValue;
                 b.stencilReference = pendingMaskWriteReference;
                 pendingMaskStencilClear = false;
+                maskStencilWritten = true;
             } else {
                 b.pipelineKind = PipelineKind.Mask;
                 b.blendMode = BlendMode.Normal;
@@ -2203,7 +2222,6 @@ private:
 
                 foreach (i; start .. stop) {
                     auto ref b = batches[i];
-                    if (b.indexCount == 0) continue;
                     auto kind = b.pipelineKind;
                     bool stencilKind = kind == PipelineKind.PartStencilTest ||
                                        kind == PipelineKind.PartStencilWrite ||
@@ -2247,6 +2265,8 @@ private:
                         sr.rect.extent = extent;
                         vkCmdClearAttachments(cmd, 1, &stencilClr, 1, &sr);
                     }
+
+                    if (b.indexCount == 0) continue;
 
                     auto pipeline = offscreen
                         ? offscreenPipelines[cast(size_t)kind][cast(size_t)b.blendMode]
