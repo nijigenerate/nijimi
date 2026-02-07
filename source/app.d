@@ -1,6 +1,5 @@
 module app;
 
-import core.sys.posix.dlfcn : dlopen, dlsym, dlclose, RTLD_NOW, RTLD_LOCAL, dlerror;
 import core.time : MonoTime, Duration, seconds;
 import std.conv : to;
 import std.exception : enforce;
@@ -10,6 +9,12 @@ import std.stdio : writeln, writefln;
 import std.string : fromStringz, toStringz, endsWith;
 import std.math : exp;
 import std.algorithm : clamp;
+
+version (Windows) {
+    import core.sys.windows.windows : HMODULE, GetLastError, GetProcAddress;
+} else version (Posix) {
+    import core.sys.posix.dlfcn : dlsym, dlerror;
+}
 
 import bindbc.sdl;
 
@@ -60,15 +65,50 @@ struct UnityApi {
     FnSetPuppetScale setPuppetScale;
 }
 
-string dlErrorString() {
-    auto err = dlerror();
-    return err is null ? "" : fromStringz(err).idup;
+string dynamicLookupError() {
+    version (Windows) {
+        return "GetProcAddress failed (GetLastError=" ~ to!string(GetLastError()) ~ ")";
+    } else version (Posix) {
+        auto err = dlerror();
+        return err is null ? "dlsym failed" : fromStringz(err).idup;
+    } else {
+        return "symbol lookup failed";
+    }
 }
 
 T loadSymbol(T)(void* lib, string name) {
-    auto sym = cast(T)dlsym(lib, name.toStringz);
-    enforce(sym !is null, "Failed to load symbol "~name~" from libnijilive-unity: "~dlErrorString());
-    return sym;
+    version (Windows) {
+        auto sym = cast(T)GetProcAddress(cast(HMODULE)lib, name.toStringz);
+        enforce(sym !is null,
+            "Failed to load symbol "~name~
+            " from libnijilive-unity: " ~ dynamicLookupError());
+        return sym;
+    } else version (Posix) {
+        auto sym = cast(T)dlsym(lib, name.toStringz);
+        enforce(sym !is null,
+            "Failed to load symbol "~name~" from libnijilive-unity: " ~ dynamicLookupError());
+        return sym;
+    } else {
+        static assert(false, "Unsupported platform for dynamic symbol loading");
+    }
+}
+
+T loadOptionalSymbol(T)(void* lib, string name) {
+    version (Windows) {
+        auto sym = cast(T)GetProcAddress(cast(HMODULE)lib, name.toStringz);
+        if (sym is null) {
+            writeln("Optional symbol missing: ", name, " (", dynamicLookupError(), ")");
+        }
+        return sym;
+    } else version (Posix) {
+        auto sym = cast(T)dlsym(lib, name.toStringz);
+        if (sym is null) {
+            writeln("Optional symbol missing: ", name, " (", dynamicLookupError(), ")");
+        }
+        return sym;
+    } else {
+        static assert(false, "Unsupported platform for dynamic symbol loading");
+    }
 }
 
 UnityApi loadUnityApi(string libPath) {
@@ -85,12 +125,12 @@ UnityApi loadUnityApi(string libPath) {
     api.tickPuppet = loadSymbol!FnTickPuppet(lib, "njgTickPuppet");
     api.emitCommands = loadSymbol!FnEmitCommands(lib, "njgEmitCommands");
     api.flushCommands = loadSymbol!FnFlushCommandBuffer(lib, "njgFlushCommandBuffer");
-    api.setLogCallback = loadSymbol!FnSetLogCallback(lib, "njgSetLogCallback");
+    api.setLogCallback = loadOptionalSymbol!FnSetLogCallback(lib, "njgSetLogCallback");
     api.getSharedBuffers = loadSymbol!FnGetSharedBuffers(lib, "njgGetSharedBuffers");
-    api.setPuppetScale = loadSymbol!FnSetPuppetScale(lib, "njgSetPuppetScale");
+    api.setPuppetScale = loadOptionalSymbol!FnSetPuppetScale(lib, "njgSetPuppetScale");
     // Explicit runtime init/term provided by DLL.
-    api.rtInit = loadSymbol!FnRtInit(lib, "njgRuntimeInit");
-    api.rtTerm = loadSymbol!FnRtTerm(lib, "njgRuntimeTerm");
+    api.rtInit = loadOptionalSymbol!FnRtInit(lib, "njgRuntimeInit");
+    api.rtTerm = loadOptionalSymbol!FnRtTerm(lib, "njgRuntimeTerm");
     return api;
 }
 
@@ -232,7 +272,9 @@ void main(string[] args) {
     // Do not unload the shared runtime-bound DLL during process lifetime.
     if (api.rtInit !is null) api.rtInit();
     scope (exit) if (api.rtTerm !is null) api.rtTerm();
-    api.setLogCallback(&logCallback, null);
+    if (api.setLogCallback !is null) {
+        api.setLogCallback(&logCallback, null);
+    }
 
     gfx.UnityRendererConfig rendererCfg;
     rendererCfg.viewportWidth = backendInit.drawableW;
@@ -257,9 +299,11 @@ void main(string[] args) {
     float puppetScale = 0.12f;
 
     // Apply initial scale (default 0.25) so that the view starts zoomed out.
-    auto initScaleRes = api.setPuppetScale(puppet, puppetScale, puppetScale);
-    if (initScaleRes != gfx.NjgResult.Ok) {
-        writeln("njgSetPuppetScale initial apply failed: ", initScaleRes);
+    if (api.setPuppetScale !is null) {
+        auto initScaleRes = api.setPuppetScale(puppet, puppetScale, puppetScale);
+        if (initScaleRes != gfx.NjgResult.Ok) {
+            writeln("njgSetPuppetScale initial apply failed: ", initScaleRes);
+        }
     }
 
     bool running = true;
@@ -299,9 +343,11 @@ void main(string[] args) {
                         float step = 0.1f; // ~10% per notch
                         float factor = cast(float)exp(step * -ev.wheel.y);
                         puppetScale = clamp(puppetScale * factor, 0.1f, 10.0f);
-                        auto res = api.setPuppetScale(puppet, puppetScale, puppetScale);
-                        if (res != gfx.NjgResult.Ok) {
-                            writeln("njgSetPuppetScale failed: ", res);
+                        if (api.setPuppetScale !is null) {
+                            auto res = api.setPuppetScale(puppet, puppetScale, puppetScale);
+                            if (res != gfx.NjgResult.Ok) {
+                                writeln("njgSetPuppetScale failed: ", res);
+                            }
                         }
                     }
                     break;

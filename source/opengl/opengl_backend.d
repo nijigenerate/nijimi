@@ -2102,8 +2102,6 @@ private:
         pass.origBuffer = packet.origBuffer;
         pass.origViewport[] = packet.origViewport;
         pass.autoScaled = packet.autoScaled;
-        pass.drawBufferCount = packet.drawBufferCount;
-        pass.hasStencil = packet.hasStencil;
         return pass;
     }
 }
@@ -2126,6 +2124,9 @@ enum NjgRenderCommandKind : uint {
     ApplyMask,
     BeginMaskContent,
     EndMask,
+    BeginComposite,
+    DrawCompositeQuad,
+    EndComposite,
 }
 extern(C) struct UnityRendererConfig {
     int viewportWidth;
@@ -2142,6 +2143,7 @@ extern(C) struct NjgPartDrawPacket {
     bool renderable;
     float[16] modelMatrix;
     float[16] renderMatrix;
+    vec2 renderScale;
     float renderRotation;
     vec3 clampedTint;
     vec3 clampedScreen;
@@ -2194,8 +2196,6 @@ extern(C) struct NjgDynamicCompositePass {
     bool autoScaled;
     RenderResourceHandle origBuffer;
     int[4] origViewport;
-    int drawBufferCount;
-    bool hasStencil;
 }
 
 extern(C) struct NjgQueuedCommand {
