@@ -447,6 +447,7 @@ private:
     bool pendingMaskStencilClear;
     uint32_t pendingMaskStencilClearValue = 1;
     uint32_t pendingMaskWriteReference = 1;
+    bool advancedBlendSupported;
     VkTextureResource[size_t] textureResources;
     VkTextureResource fallbackWhite;
     VkTextureResource fallbackBlack;
@@ -968,10 +969,30 @@ private:
             queueInfos[1].pQueuePriorities = &priority;
         }
 
+        uint32_t devExtCount = 0;
+        vkEnforce(vkEnumerateDeviceExtensionProperties(physicalDevice, null, &devExtCount, null),
+            "vkEnumerateDeviceExtensionProperties count failed");
+        VkExtensionProperties[] availableExts;
+        availableExts.length = devExtCount;
+        if (devExtCount > 0) {
+            vkEnforce(vkEnumerateDeviceExtensionProperties(physicalDevice, null, &devExtCount, availableExts.ptr),
+                "vkEnumerateDeviceExtensionProperties failed");
+        }
+        auto hasDevExt = (string name) {
+            foreach (e; availableExts) {
+                if (fromStringz(e.extensionName.ptr) == name) return true;
+            }
+            return false;
+        };
+
         string[] devExtNames;
         devExtNames ~= "VK_KHR_swapchain";
         version (OSX) {
             devExtNames ~= "VK_KHR_portability_subset";
+        }
+        advancedBlendSupported = hasDevExt("VK_EXT_blend_operation_advanced");
+        if (advancedBlendSupported) {
+            devExtNames ~= "VK_EXT_blend_operation_advanced";
         }
 
         const(char)*[] devExts;
@@ -1477,6 +1498,16 @@ private:
         bool stencilWriteKind = kind == PipelineKind.PartStencilWrite ||
                                 kind == PipelineKind.PartMaskStencilWrite ||
                                 kind == PipelineKind.MaskStencilWrite;
+        bool useAdvancedEquation = advancedBlendSupported && isAdvancedEquationMode(blendMode);
+        if (useAdvancedEquation) {
+            auto advOp = advancedBlendOpFor(blendMode);
+            blendAtt.colorBlendOp = advOp;
+            blendAtt.alphaBlendOp = advOp;
+            blendAtt.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            blendAtt.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            blendAtt.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blendAtt.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        }
         blendAtt.colorWriteMask = stencilWriteKind
             ? 0
             : (VK_COLOR_COMPONENT_R_BIT |
@@ -1484,8 +1515,19 @@ private:
                VK_COLOR_COMPONENT_B_BIT |
                VK_COLOR_COMPONENT_A_BIT);
 
+        VkPipelineColorBlendAdvancedStateCreateInfoEXT advancedBlendInfo;
+        if (useAdvancedEquation) {
+            advancedBlendInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_ADVANCED_STATE_CREATE_INFO_EXT;
+            advancedBlendInfo.srcPremultiplied = VK_TRUE;
+            advancedBlendInfo.dstPremultiplied = VK_TRUE;
+            advancedBlendInfo.blendOverlap = VK_BLEND_OVERLAP_UNCORRELATED_EXT;
+        }
+
         VkPipelineColorBlendStateCreateInfo blend;
         blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        if (useAdvancedEquation) {
+            blend.pNext = &advancedBlendInfo;
+        }
         blend.attachmentCount = 1;
         blend.pAttachments = &blendAtt;
 
@@ -1548,6 +1590,70 @@ private:
         VkShaderModule shaderModule;
         vkEnforce(vkCreateShaderModule(device, &info, null, &shaderModule), "vkCreateShaderModule failed");
         return shaderModule;
+    }
+
+    bool isAdvancedEquationMode(BlendMode mode) const {
+        final switch (mode) {
+            case BlendMode.Multiply:
+            case BlendMode.Screen:
+            case BlendMode.Overlay:
+            case BlendMode.Darken:
+            case BlendMode.Lighten:
+            case BlendMode.ColorDodge:
+            case BlendMode.ColorBurn:
+            case BlendMode.HardLight:
+            case BlendMode.SoftLight:
+            case BlendMode.Difference:
+            case BlendMode.Exclusion:
+                return true;
+            case BlendMode.Normal:
+            case BlendMode.LinearDodge:
+            case BlendMode.AddGlow:
+            case BlendMode.Subtract:
+            case BlendMode.Inverse:
+            case BlendMode.DestinationIn:
+            case BlendMode.ClipToLower:
+            case BlendMode.SliceFromLower:
+            case BlendMode.Count:
+                return false;
+        }
+    }
+
+    VkBlendOp advancedBlendOpFor(BlendMode mode) const {
+        final switch (mode) {
+            case BlendMode.Multiply:
+                return VK_BLEND_OP_MULTIPLY_EXT;
+            case BlendMode.Screen:
+                return VK_BLEND_OP_SCREEN_EXT;
+            case BlendMode.Overlay:
+                return VK_BLEND_OP_OVERLAY_EXT;
+            case BlendMode.Darken:
+                return VK_BLEND_OP_DARKEN_EXT;
+            case BlendMode.Lighten:
+                return VK_BLEND_OP_LIGHTEN_EXT;
+            case BlendMode.ColorDodge:
+                return VK_BLEND_OP_COLORDODGE_EXT;
+            case BlendMode.ColorBurn:
+                return VK_BLEND_OP_COLORBURN_EXT;
+            case BlendMode.HardLight:
+                return VK_BLEND_OP_HARDLIGHT_EXT;
+            case BlendMode.SoftLight:
+                return VK_BLEND_OP_SOFTLIGHT_EXT;
+            case BlendMode.Difference:
+                return VK_BLEND_OP_DIFFERENCE_EXT;
+            case BlendMode.Exclusion:
+                return VK_BLEND_OP_EXCLUSION_EXT;
+            case BlendMode.Normal:
+            case BlendMode.LinearDodge:
+            case BlendMode.AddGlow:
+            case BlendMode.Subtract:
+            case BlendMode.Inverse:
+            case BlendMode.DestinationIn:
+            case BlendMode.ClipToLower:
+            case BlendMode.SliceFromLower:
+            case BlendMode.Count:
+                return VK_BLEND_OP_ADD;
+        }
     }
 
     VkPipelineColorBlendAttachmentState buildBlendAttachment(BlendMode mode) {
