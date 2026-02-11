@@ -242,6 +242,7 @@ import fghj : deserializeValue;
 import core.stdc.string : memcpy;
 
 public vec4 inClearColor = vec4(0, 0, 0, 0);
+public bool useColorKeyTransparency = false;
 vec3 inSceneAmbientLight = vec3(1, 1, 1);
 
 private __gshared RenderBackend cachedRenderBackend;
@@ -609,6 +610,11 @@ class RenderingBackend {
     private GLuint sharedDeformBuffer;
     private GLuint sharedVertexBuffer;
     private GLuint sharedUvBuffer;
+    private GLuint presentVao;
+    private GLuint presentVbo;
+    private GLuint presentProgram;
+    private GLint presentTexUniform = -1;
+    private GLint presentUseColorKeyUniform = -1;
     private GLuint sharedIndexBuffer;
     private size_t sharedIndexCapacity;
     private size_t sharedIndexOffset;
@@ -974,6 +980,109 @@ public:
         glDisable(GL_BLEND);
         glFlush();
         glDrawBuffers(1, [GL_COLOR_ATTACHMENT0].ptr);
+    }
+
+    private void ensurePresentProgram() {
+        if (presentProgram != 0 && presentVao != 0 && presentVbo != 0) return;
+
+        immutable presentVs = q{
+#version 330
+layout(location = 0) in vec2 inPos;
+layout(location = 1) in vec2 inUv;
+out vec2 texUVs;
+void main() {
+    texUVs = inUv;
+    gl_Position = vec4(inPos, 0.0, 1.0);
+}};
+
+        immutable presentFs = q{
+#version 330
+in vec2 texUVs;
+out vec4 outColor;
+uniform sampler2D srcTex;
+uniform int useColorKey;
+void main() {
+    vec4 c = texture(srcTex, texUVs);
+    if (useColorKey != 0) {
+        if (c.a <= 0.001) {
+            outColor = vec4(1.0, 0.0, 1.0, 1.0);
+        } else {
+            vec3 straight = clamp(c.rgb / max(c.a, 0.0001), 0.0, 1.0);
+            outColor = vec4(straight, 1.0);
+        }
+    } else {
+        outColor = c;
+    }
+}};
+
+        auto vs = glCreateShader(GL_VERTEX_SHADER);
+        auto vsrc = presentVs.toStringz;
+        glShaderSource(vs, 1, &vsrc, null);
+        glCompileShader(vs);
+        checkShader(vs);
+
+        auto fs = glCreateShader(GL_FRAGMENT_SHADER);
+        auto fsrc = presentFs.toStringz;
+        glShaderSource(fs, 1, &fsrc, null);
+        glCompileShader(fs);
+        checkShader(fs);
+
+        presentProgram = glCreateProgram();
+        glAttachShader(presentProgram, vs);
+        glAttachShader(presentProgram, fs);
+        glLinkProgram(presentProgram);
+        checkProgram(presentProgram);
+        glDeleteShader(vs);
+        glDeleteShader(fs);
+
+        presentTexUniform = glGetUniformLocation(presentProgram, "srcTex".toStringz);
+        presentUseColorKeyUniform = glGetUniformLocation(presentProgram, "useColorKey".toStringz);
+
+        glGenVertexArrays(1, &presentVao);
+        glGenBuffers(1, &presentVbo);
+        glBindVertexArray(presentVao);
+        glBindBuffer(GL_ARRAY_BUFFER, presentVbo);
+        immutable float[] quad = [
+            -1.0f, -1.0f, 0.0f, 0.0f,
+             1.0f, -1.0f, 1.0f, 0.0f,
+             1.0f,  1.0f, 1.0f, 1.0f,
+            -1.0f, -1.0f, 0.0f, 0.0f,
+             1.0f,  1.0f, 1.0f, 1.0f,
+            -1.0f,  1.0f, 0.0f, 1.0f,
+        ];
+        glBufferData(GL_ARRAY_BUFFER, cast(GLsizeiptr)(quad.length * float.sizeof), quad.ptr, GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * float.sizeof, null);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * float.sizeof, cast(void*)(2 * float.sizeof));
+        glBindVertexArray(0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+    }
+
+    void presentSceneToBackbuffer(int width, int height) {
+        ensurePresentProgram();
+
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+        glDrawBuffer(GL_BACK);
+        glViewport(0, 0, width, height);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_BLEND);
+        if (useColorKeyTransparency) {
+            glClearColor(1, 0, 1, 1);
+        } else {
+            glClearColor(0, 0, 0, 0);
+        }
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        glUseProgram(presentProgram);
+        if (presentTexUniform != -1) glUniform1i(presentTexUniform, 0);
+        if (presentUseColorKeyUniform != -1) glUniform1i(presentUseColorKeyUniform, useColorKeyTransparency ? 1 : 0);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, fAlbedo);
+        glBindVertexArray(presentVao);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        glBindVertexArray(0);
     }
 
     void postProcessScene() {
@@ -2460,16 +2569,7 @@ void renderCommands(const OpenGLBackendInit* gl,
         }
     }
     backend.postProcessScene();
-    auto srcFbo = cast(GLuint)backend.framebufferHandle();
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, srcFbo);
-    glReadBuffer(GL_COLOR_ATTACHMENT0);
-
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-    glDrawBuffer(GL_BACK);
-    glViewport(0, 0, gl.drawableW, gl.drawableH);
-    glBlitFramebuffer(0, 0, gl.drawableW, gl.drawableH,
-                      0, 0, gl.drawableW, gl.drawableH,
-                      GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    backend.presentSceneToBackbuffer(gl.drawableW, gl.drawableH);
     // NOTE: Disabled per request. This debug overlay rewrites final pixels,
     // which interferes with transparent-window verification.
     // GLuint[] thumbTextureIds;

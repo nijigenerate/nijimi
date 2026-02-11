@@ -49,7 +49,7 @@ version (EnableVulkanBackend) {
 } else {
     import bindbc.opengl;
     import gfx = opengl.opengl_backend;
-    import opengl.opengl_backend : currentRenderBackend, inClearColor;
+    import opengl.opengl_backend : currentRenderBackend, inClearColor, useColorKeyTransparency;
     enum backendName = "opengl";
     alias BackendInit = gfx.OpenGLBackendInit;
 }
@@ -661,16 +661,18 @@ void main(string[] args) {
     version (Windows) {
         version (EnableDirectXBackend) {
         } else {
-            if (windowsTransparencyMode() == WindowsTransparencyMode.ColorKey) {
-                // Match Windows colorkey (RGB 255,0,255) so background pixels become fully transparent.
-                version (EnableVulkanBackend) {
+            version (EnableVulkanBackend) {
+                if (windowsTransparencyMode() == WindowsTransparencyMode.ColorKey) {
+                    // Match Windows colorkey (RGB 255,0,255) so background pixels become fully transparent.
                     gfx.inClearColor = typeof(gfx.inClearColor)(1.0f, 0.0f, 1.0f, 1.0f);
                 } else {
-                    inClearColor = typeof(inClearColor)(1.0f, 0.0f, 1.0f, 1.0f);
+                    // DWM composition path expects transparent background in swapchain.
+                    gfx.inClearColor = typeof(gfx.inClearColor)(0.0f, 0.0f, 0.0f, 0.0f);
                 }
-            } else version (EnableVulkanBackend) {
-                // DWM composition path expects transparent background in swapchain.
-                gfx.inClearColor = typeof(gfx.inClearColor)(0.0f, 0.0f, 0.0f, 0.0f);
+            } else {
+                // OpenGL colorkey path: keep offscreen transparent; convert to colorkey only at present pass.
+                inClearColor = typeof(inClearColor)(0.0f, 0.0f, 0.0f, 0.0f);
+                useColorKeyTransparency = (windowsTransparencyMode() == WindowsTransparencyMode.ColorKey);
             }
         }
     }
