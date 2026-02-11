@@ -12,8 +12,9 @@ This repository focuses on host-side integration:
 
 - OpenGL backend: `source/opengl/opengl_backend.d`
 - Vulkan backend: `source/vulkan/vulkan_backend.d`
+- DirectX backend (Windows): `source/directx/directx_backend.d`
 
-Both are selectable with DUB configurations.
+All backends are selectable with DUB configurations.
 
 ## DUB Configurations
 
@@ -26,6 +27,11 @@ Both are selectable with DUB configurations.
   - backend dependency: `erupted`
   - version flag: `EnableVulkanBackend`
   - excludes: `source/opengl/**`
+- `directx` (Windows)
+  - target: `nijiv-directx`
+  - backend dependency: `aurora-directx`
+  - version flag: `EnableDirectXBackend`
+  - excludes: `source/opengl/**`, `source/vulkan/**`
 
 Common dependencies are kept at package root (SDL, math/image/support libs).
 
@@ -103,6 +109,12 @@ Vulkan:
 dub build --config=vulkan
 ```
 
+DirectX (Windows):
+
+```bash
+dub build --config=directx
+```
+
 ## Run
 
 OpenGL:
@@ -115,6 +127,12 @@ Vulkan:
 
 ```bash
 ./nijiv-vulkan <puppet.inp|puppet.inx> [width height] [--test] [--frames N]
+```
+
+DirectX (Windows):
+
+```bash
+./nijiv-directx <puppet.inp|puppet.inx> [width height] [--test] [--frames N]
 ```
 
 Notes:
@@ -139,10 +157,22 @@ Search order:
 CLI:
 - `--test`
 - `--frames N`
+- `--transparent-window` / `--no-transparent-window`
+- `--transparent-window-retry` / `--no-transparent-window-retry`
+- `--transparent-debug` / `--no-transparent-debug`
 
 Environment variables:
 - `NJIV_TEST_FRAMES`
 - `NJIV_TEST_TIMEOUT_MS`
+- `NJIV_TRANSPARENT_WINDOW`
+- `NJIV_TRANSPARENT_WINDOW_RETRY`
+- `NJIV_TRANSPARENT_DEBUG`
+- `NJIV_WINDOWS_BLUR_BEHIND` (Windows DWM mode)
+
+## Windows Transparency Notes
+
+- OpenGL/DirectX default to layered `colorkey` transparency.
+- Vulkan defaults to DWM composition mode.
 
 ## Vulkan Status
 
