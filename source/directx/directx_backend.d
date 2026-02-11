@@ -2777,8 +2777,6 @@ public:
                 span.clearStencil = maskClearPending;
                 span.stencilClearValue = maskClearValue;
                 maskClearPending = false;
-                span.isMask = true;
-                span.maskThreshold = 0.0f;
                 span.blendMode = BlendMode.Normal;
             } else if (inMaskPass) {
                 if (!inMaskContent) {
@@ -2788,12 +2786,8 @@ public:
                     span.blendMode = BlendMode.Normal;
                 } else {
                     span.isMask = false;
-                    if (maskUsesStencil) {
-                        span.stencilMode = StencilMode.TestEqual;
-                        span.stencilRef = 1;
-                    } else {
-                        span.blendMode = BlendMode.DestinationIn;
-                    }
+                    span.stencilMode = StencilMode.TestEqual;
+                    span.stencilRef = 1;
                 }
             }
             enqueueSpan(span);
@@ -2881,12 +2875,8 @@ public:
                 maskClearPending = false;
             } else if (inMaskPass && inMaskContent) {
                 span.isMask = false;
-                if (maskUsesStencil) {
-                    span.stencilMode = StencilMode.TestEqual;
-                    span.stencilRef = 1;
-                } else {
-                    span.blendMode = BlendMode.DestinationIn;
-                }
+                span.stencilMode = StencilMode.TestEqual;
+                span.stencilRef = 1;
             }
 
             enqueueSpan(span);
