@@ -8,7 +8,7 @@ This repository focuses on host-side integration:
 - receive command queue/shared buffers from DLL
 - execute rendering on the host backend
 
-In other words, `nijimi` is an application to display a live 2D character as a desktop mascot overlay.
+In other words, `nijimi` is an application that displays an animated 2D character as a desktop mascot overlay.
 
 ## Backends
 
