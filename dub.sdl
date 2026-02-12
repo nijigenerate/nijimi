@@ -11,9 +11,11 @@ dependency "bindbc-loader" version="~>1.1.0"
 dependency "fghj" version="~>1.0.2"
 dependency "inmath" version="1.0.6"
 dependency "imagefmt" version="~>2.1.0"
+dependency "facetrack-d" path="../ng-facetrack-d"
 stringImportPaths "source"
 
 versions "SDL_3_2" "GL_32"
+subConfiguration "facetrack-d" "default"
 
 importPaths "source"
 excludedSourceFiles "source/nlshim/core/render/graph_builder.d source/nlshim/core/render/scheduler.d source/nlshim/core/render/command_emitter.d source/nlshim/core/render/backends/queue/** source/nlshim/core/render/backends/opengl/queue.d source/nlshim/core/render/backends/opengl/diff_collect_impl.d source/nlshim/core/render/backends/opengl/draw_texture.d source/nlshim/core/render/backends/directx12/** source/nlshim/core/render/immediate.d"
@@ -21,14 +23,14 @@ excludedSourceFiles "source/nlshim/core/render/graph_builder.d source/nlshim/cor
 configuration "opengl" {
     targetName "nijimi-opengl"
     dependency "bindbc-opengl" version="*"
-    excludedSourceFiles "source/vulkan/**"
+    excludedSourceFiles "source/render/vulkan/**"
 }
 
 configuration "vulkan" {
     targetName "nijimi-vulkan"
     dependency "erupted" version="*"
     versions "EnableVulkanBackend"
-    excludedSourceFiles "source/opengl/**" "source/directx/**"
+    excludedSourceFiles "source/render/opengl/**" "source/render/directx/**"
 }
 
 configuration "directx" {
@@ -37,5 +39,5 @@ configuration "directx" {
     dependency "aurora-directx" version="~>12.1.2+10.0.17763.0"
     versions "EnableDirectXBackend"
     lflags "d3d12.lib" "dxgi.lib" "dxguid.lib" "d3dcompiler.lib"
-    excludedSourceFiles "source/opengl/**" "source/vulkan/**"
+    excludedSourceFiles "source/render/opengl/**" "source/render/vulkan/**"
 }

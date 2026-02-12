@@ -1,4 +1,4 @@
-module vulkan_backend;
+module render.vulkan.vulkan_backend;
 
 version (EnableVulkanBackend) {
 
@@ -1646,7 +1646,7 @@ private:
     const(ubyte)[] vertexShaderCode(PipelineKind kind) {
         final switch (kind) {
             case PipelineKind.Mask:
-                return cast(const(ubyte)[])import("vulkan/shaders/mask.vert.spv");
+                return cast(const(ubyte)[])import("render/vulkan/shaders/mask.vert.spv");
             case PipelineKind.Part:
             case PipelineKind.PartStage1:
             case PipelineKind.PartStage2:
@@ -1654,34 +1654,34 @@ private:
             case PipelineKind.PartStencilTest:
             case PipelineKind.PartStencilWrite:
             case PipelineKind.PartMaskStencilWrite:
-                return cast(const(ubyte)[])import("vulkan/shaders/part.vert.spv");
+                return cast(const(ubyte)[])import("render/vulkan/shaders/part.vert.spv");
             case PipelineKind.MaskStencilWrite:
             case PipelineKind.Count:
-                return cast(const(ubyte)[])import("vulkan/shaders/part.vert.spv");
+                return cast(const(ubyte)[])import("render/vulkan/shaders/part.vert.spv");
         }
     }
 
     const(ubyte)[] fragmentShaderCode(PipelineKind kind) {
         final switch (kind) {
             case PipelineKind.Part:
-                return cast(const(ubyte)[])import("vulkan/shaders/part.frag.spv");
+                return cast(const(ubyte)[])import("render/vulkan/shaders/part.frag.spv");
             case PipelineKind.PartStage1:
-                return cast(const(ubyte)[])import("vulkan/shaders/part_stage1.frag.spv");
+                return cast(const(ubyte)[])import("render/vulkan/shaders/part_stage1.frag.spv");
             case PipelineKind.PartStage2:
-                return cast(const(ubyte)[])import("vulkan/shaders/part_stage2.frag.spv");
+                return cast(const(ubyte)[])import("render/vulkan/shaders/part_stage2.frag.spv");
             case PipelineKind.PartMask:
-                return cast(const(ubyte)[])import("vulkan/shaders/part_mask.frag.spv");
+                return cast(const(ubyte)[])import("render/vulkan/shaders/part_mask.frag.spv");
             case PipelineKind.Mask:
-                return cast(const(ubyte)[])import("vulkan/shaders/mask.frag.spv");
+                return cast(const(ubyte)[])import("render/vulkan/shaders/mask.frag.spv");
             case PipelineKind.PartStencilTest:
             case PipelineKind.PartStencilWrite:
-                return cast(const(ubyte)[])import("vulkan/shaders/part.frag.spv");
+                return cast(const(ubyte)[])import("render/vulkan/shaders/part.frag.spv");
             case PipelineKind.PartMaskStencilWrite:
-                return cast(const(ubyte)[])import("vulkan/shaders/part_mask.frag.spv");
+                return cast(const(ubyte)[])import("render/vulkan/shaders/part_mask.frag.spv");
             case PipelineKind.MaskStencilWrite:
-                return cast(const(ubyte)[])import("vulkan/shaders/mask.frag.spv");
+                return cast(const(ubyte)[])import("render/vulkan/shaders/mask.frag.spv");
             case PipelineKind.Count:
-                return cast(const(ubyte)[])import("vulkan/shaders/part.frag.spv");
+                return cast(const(ubyte)[])import("render/vulkan/shaders/part.frag.spv");
         }
     }
 

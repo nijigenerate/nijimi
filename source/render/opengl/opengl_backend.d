@@ -1,11 +1,11 @@
-module opengl.opengl_backend;
+module render.opengl.opengl_backend;
 
 import std.exception : enforce;
 import std.string : fromStringz;
 import std.conv : to;
 
 import bindbc.opengl;
-import opengl.opengl_thumb : currentDebugTextureBackend;
+import render.opengl.opengl_thumb : currentDebugTextureBackend;
 
 // OpenGL backend is provided by top-level opengl/* modules; avoid importing nlshim copies.
 
@@ -571,12 +571,12 @@ class GLTextureHandle {
 }
 
 // ---- Shader Asset Definitions (centralized) ----
-private enum ShaderAsset MaskShaderSource = shaderAsset!("opengl/shaders/mask.vert","opengl/shaders/mask.frag")();
-private enum ShaderAsset AdvancedBlendShaderSource = shaderAsset!("opengl/shaders/basic.vert","opengl/shaders/advanced_blend.frag")();
-private enum ShaderAsset PartShaderSource = shaderAsset!("opengl/shaders/basic.vert","opengl/shaders/basic.frag")();
-private enum ShaderAsset PartShaderStage1Source = shaderAsset!("opengl/shaders/basic.vert","opengl/shaders/basic-stage1.frag")();
-private enum ShaderAsset PartShaderStage2Source = shaderAsset!("opengl/shaders/basic.vert","opengl/shaders/basic-stage2.frag")();
-private enum ShaderAsset PartMaskShaderSource = shaderAsset!("opengl/shaders/basic.vert","opengl/shaders/basic-mask.frag")();
+private enum ShaderAsset MaskShaderSource = shaderAsset!("render/opengl/shaders/mask.vert","render/opengl/shaders/mask.frag")();
+private enum ShaderAsset AdvancedBlendShaderSource = shaderAsset!("render/opengl/shaders/basic.vert","render/opengl/shaders/advanced_blend.frag")();
+private enum ShaderAsset PartShaderSource = shaderAsset!("render/opengl/shaders/basic.vert","render/opengl/shaders/basic.frag")();
+private enum ShaderAsset PartShaderStage1Source = shaderAsset!("render/opengl/shaders/basic.vert","render/opengl/shaders/basic-stage1.frag")();
+private enum ShaderAsset PartShaderStage2Source = shaderAsset!("render/opengl/shaders/basic.vert","render/opengl/shaders/basic-stage2.frag")();
+private enum ShaderAsset PartMaskShaderSource = shaderAsset!("render/opengl/shaders/basic.vert","render/opengl/shaders/basic-mask.frag")();
 
 // queue/backend not used in this binary; avoid pulling queue modules
 import inmath.linalg : rect;

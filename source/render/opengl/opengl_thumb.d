@@ -1,4 +1,4 @@
-module opengl.opengl_thumb;
+module render.opengl.opengl_thumb;
 
 import std.exception : enforce;
 

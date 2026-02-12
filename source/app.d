@@ -29,19 +29,20 @@ version (Posix) {
 import bindbc.sdl;
 import uilib.sdl : configureWindowAlwaysOnTop, configureWindowBorderlessDesktop, configureWindowInputPolicy, initializeSystemTray, updateSystemTray, consumeTrayQuitRequested,
     consumeTrayToggleRequested, setSystemTrayWindowVisible, shutdownSystemTray;
+import tracking : TrackingReceiver, TrackingBindingsExtKey;
 
 version (EnableVulkanBackend) {
-    import gfx = vulkan_backend;
+    import gfx = render.vulkan.vulkan_backend;
     enum backendName = "vulkan";
     alias BackendInit = gfx.VulkanBackendInit;
 } else version (EnableDirectXBackend) {
-    import gfx = directx.directx_backend;
+    import gfx = render.directx.directx_backend;
     enum backendName = "directx";
     alias BackendInit = gfx.DirectXBackendInit;
 } else {
     import bindbc.opengl;
-    import gfx = opengl.opengl_backend;
-    import opengl.opengl_backend : currentRenderBackend, inClearColor, useColorKeyTransparency;
+    import gfx = render.opengl.opengl_backend;
+    import render.opengl.opengl_backend : currentRenderBackend, inClearColor, useColorKeyTransparency;
     enum backendName = "opengl";
     alias BackendInit = gfx.OpenGLBackendInit;
 }
@@ -64,6 +65,13 @@ alias FnRtTerm = extern(C) void function();
 alias FnGetSharedBuffers = extern(C) gfx.NjgResult function(gfx.RendererHandle, gfx.SharedBufferSnapshot*);
 alias FnSetPuppetScale = extern(C) gfx.NjgResult function(gfx.PuppetHandle, float, float);
 alias FnSetPuppetTranslation = extern(C) gfx.NjgResult function(gfx.PuppetHandle, float, float);
+alias FnGetPuppetExtData = extern(C) gfx.NjgResult function(gfx.PuppetHandle, const(char)*, const(ubyte)**, size_t*);
+extern(C) struct PuppetParameterUpdate {
+    uint parameterUuid;
+    float valueX;
+    float valueY;
+}
+alias FnUpdateParameters = extern(C) gfx.NjgResult function(gfx.PuppetHandle, const(PuppetParameterUpdate)*, size_t);
 
 struct UnityApi {
     void* lib;
@@ -81,6 +89,8 @@ struct UnityApi {
     FnRtTerm rtTerm;
     FnSetPuppetScale setPuppetScale;
     FnSetPuppetTranslation setPuppetTranslation;
+    FnGetPuppetExtData getPuppetExtData;
+    FnUpdateParameters updateParameters;
 }
 
 string dynamicLookupError() {
@@ -147,6 +157,8 @@ UnityApi loadUnityApi(string libPath) {
     api.getSharedBuffers = loadSymbol!FnGetSharedBuffers(lib, "njgGetSharedBuffers");
     api.setPuppetScale = loadOptionalSymbol!FnSetPuppetScale(lib, "njgSetPuppetScale");
     api.setPuppetTranslation = loadOptionalSymbol!FnSetPuppetTranslation(lib, "njgSetPuppetTranslation");
+    api.getPuppetExtData = loadOptionalSymbol!FnGetPuppetExtData(lib, "njgGetPuppetExtData");
+    api.updateParameters = loadOptionalSymbol!FnUpdateParameters(lib, "njgUpdateParameters");
     // Explicit runtime init/term provided by DLL.
     api.rtInit = loadOptionalSymbol!FnRtInit(lib, "njgRuntimeInit");
     api.rtTerm = loadOptionalSymbol!FnRtTerm(lib, "njgRuntimeTerm");
@@ -763,6 +775,52 @@ void main(string[] args) {
     }
     float dragSensitivity = cli.dragSensitivity;
     if (dragSensitivity <= 0.0f) dragSensitivity = 1.0f;
+    TrackingReceiver trackingReceiver;
+    trackingReceiver = new TrackingReceiver();
+    if (api.getPuppetExtData !is null) {
+        const(ubyte)* extPtr = null;
+        size_t extLen = 0;
+        auto extRes = api.getPuppetExtData(puppet, TrackingBindingsExtKey.toStringz, &extPtr, &extLen);
+        if (extRes == gfx.NjgResult.Ok && extPtr !is null && extLen > 0) {
+            auto loaded = trackingReceiver.loadBindingsFromExtData(extPtr[0 .. extLen].dup);
+            if (loaded) {
+                writeln("[tracking] loaded binding definitions from puppet EXT.");
+            } else {
+                writeln("[tracking] failed to parse binding definitions from puppet EXT.");
+            }
+        } else {
+            writeln("[tracking] no binding EXT data available from DLL (res=", extRes, ").");
+        }
+    } else {
+        writeln("[tracking] njgGetPuppetExtData not available; bindings not loaded.");
+    }
+    float[2][uint] trackedParameterValues;
+    trackingReceiver.setParameterUpdateSink((uint parameterUuid, int axis, float value, bool additive) {
+        if (api.updateParameters is null) return;
+        if (axis < 0 || axis > 1) return;
+        auto current = (parameterUuid in trackedParameterValues);
+        float x = 0;
+        float y = 0;
+        if (current !is null) {
+            x = (*current)[0];
+            y = (*current)[1];
+        }
+        if (axis == 0) {
+            x = additive ? x + value : value;
+        } else {
+            y = additive ? y + value : value;
+        }
+        trackedParameterValues[parameterUuid] = [x, y];
+        PuppetParameterUpdate upd;
+        upd.parameterUuid = parameterUuid;
+        upd.valueX = x;
+        upd.valueY = y;
+        auto res = api.updateParameters(puppet, &upd, 1);
+        if (res != gfx.NjgResult.Ok) {
+            writeln("njgUpdateParameters failed: ", res);
+        }
+    });
+    trackingReceiver.setupVMCReceiver();
 
     bool running = true;
     int frameCount = 0;
@@ -954,6 +1012,7 @@ void main(string[] args) {
         prev = now;
         double deltaSec = delta.total!"nsecs" / 1_000_000_000.0;
 
+        trackingReceiver.update();
         enforce(api.beginFrame(renderer, &frameCfg) == gfx.NjgResult.Ok, "njgBeginFrame failed");
         enforce(api.tickPuppet(puppet, deltaSec) == gfx.NjgResult.Ok, "njgTickPuppet failed");
 

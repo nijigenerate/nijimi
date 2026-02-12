@@ -1,4 +1,4 @@
-module directx.directx_backend;
+module render.directx.directx_backend;
 
 version (EnableDirectXBackend) {
 
