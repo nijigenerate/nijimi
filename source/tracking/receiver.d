@@ -54,6 +54,10 @@ private:
     VMCTrackingInputFrame input_;
 
 public:
+    ~this() {
+        stop();
+    }
+
     @property ref TrackingBinding[] bindings() {
         return bindings_;
     }
@@ -114,9 +118,13 @@ public:
     }
 
     void stop() {
-        if (vmc_ !is null && vmc_.isRunning()) {
-            vmc_.stop();
+        if (vmc_ !is null) {
+            if (vmc_.isRunning()) {
+                vmc_.stop();
+            }
+            vmc_ = null;
         }
+        input_ = null;
     }
 
     void update() {

@@ -1053,6 +1053,7 @@ void main(string[] args) {
         }
     }
 
+    trackingReceiver.stop();
     api.unloadPuppet(renderer, puppet);
     api.destroyRenderer(renderer);
     // Keep DLL runtime alive until process exit to avoid shutdown-order crashes.
