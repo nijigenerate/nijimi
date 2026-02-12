@@ -1,12 +1,14 @@
 # nijimi
 
-`nijimi` is a sample host viewer that renders nijilive puppets through the **nijilive Unity DLL ABI (`njg*`)**.
+`nijimi` is a desktop mascot viewer program that renders nijilive puppets through the **nijilive Unity DLL ABI (`njg*`)**.
 
 This repository focuses on host-side integration:
 - load `libnijilive-unity` and bind exported C ABI symbols
 - create rendering context (SDL3 + OpenGL or Vulkan)
 - receive command queue/shared buffers from DLL
 - execute rendering on the host backend
+
+In other words, `nijimi` is an application to display a live 2D character as a desktop mascot overlay.
 
 ## Backends
 
