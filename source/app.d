@@ -551,6 +551,7 @@ void main(string[] args) {
     SDL_SetMainReady();
     enforce(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS),
         "SDL_Init failed: " ~ (SDL_GetError() is null ? "" : fromStringz(SDL_GetError()).idup));
+    SDL_EnableScreenSaver();
 
     SDL_Window* hostWindow = null;
     void* hostGlContext = null;
