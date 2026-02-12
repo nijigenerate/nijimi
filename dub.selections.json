@@ -1,0 +1,17 @@
+{
+	"fileVersion": 1,
+	"versions": {
+		"aurora-directx": "12.1.2+10.0.17763.0",
+		"bindbc-common": "1.0.5",
+		"bindbc-loader": "1.1.0",
+		"bindbc-opengl": "1.1.1",
+		"bindbc-sdl": "2.2.2",
+		"erupted": "2.1.98+v1.3.248",
+		"fghj": "1.0.2",
+		"imagefmt": "2.1.2",
+		"inmath": "1.0.6",
+		"mir-algorithm": "3.22.4",
+		"mir-core": "1.7.3",
+		"silly": "1.1.1"
+	}
+}

@@ -4,7 +4,6 @@ import std.exception : enforce;
 import std.string : fromStringz;
 import std.conv : to;
 
-import bindbc.sdl;
 import bindbc.opengl;
 import opengl.opengl_thumb : currentDebugTextureBackend;
 
@@ -248,7 +247,7 @@ vec3 inSceneAmbientLight = vec3(1, 1, 1);
 private __gshared RenderBackend cachedRenderBackend;
 
 version (OSX) {
-    private void configureMacOpenGLSurfaceOpacity(SDL_GLContext glContext) {
+    private void configureMacOpenGLSurfaceOpacity(void* glContext) {
         if (glContext is null) return;
 
         alias ObjcId = void*;
@@ -2373,11 +2372,20 @@ extern(C) struct UnityResourceCallbacks {
 }
 
 struct OpenGLBackendInit {
-    SDL_Window* window;
-    SDL_GLContext glContext;
+    void* windowHandle;
+    void* glContextHandle;
     int drawableW;
     int drawableH;
     UnityResourceCallbacks callbacks;
+}
+
+struct OpenGLInitOptions {
+    bool loadOpenGLBindings = true;
+    void* windowHandle = null;
+    void* glContextHandle = null;
+    int drawableW = 0;
+    int drawableH = 0;
+    void* userData = null;
 }
 
 __gshared Texture[size_t] gTextures; // Unity handle -> nlshim Texture
@@ -2386,49 +2394,35 @@ __gshared bool gBackendInitialized;
 // SDL preview window for texture bytes has been removed to avoid interference.
 
 string sdlError() {
-    auto err = SDL_GetError();
-    return err is null ? "" : fromStringz(err).idup;
+    return "SDL integration is now handled by the host application";
 }
 
-/// Initialize SDL + OpenGL context and return backend + window + drawable size.
-OpenGLBackendInit initOpenGLBackend(int width, int height, bool isTest) {
-    auto support = loadSDL();
-    if (support == SDLSupport.noLibrary || support == SDLSupport.badLibrary) {
-        // Common Homebrew install path on macOS.
-        support = loadSDL("/opt/homebrew/lib/libSDL2-2.0.0.dylib");
-    }
-    enforce(support >= SDLSupport.sdl206, "Failed to load SDL2 or version too old (loaded="~support.to!string~")");
-    enforce(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) == 0, "SDL_Init failed: "~sdlError());
+/// Initialize OpenGL backend with optional externally managed window/context.
+OpenGLBackendInit initOpenGLBackend(int width, int height, bool isTest, OpenGLInitOptions opts) {
+    auto window = opts.windowHandle;
+    auto glContext = opts.glContextHandle;
+    enforce(glContext !is null,
+        "OpenGL backend requires an active context managed by host (Qt/gtk/SDL)");
 
-    // Request GL 3.3 core context.
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
-    SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
-
-    auto window = SDL_CreateWindow("nijiv",
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        width, height,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_SHOWN);
-    enforce(window !is null, "SDL_CreateWindow failed: "~sdlError());
-
-    auto glContext = SDL_GL_CreateContext(window);
-    enforce(glContext !is null, "SDL_GL_CreateContext failed: "~sdlError());
-    SDL_GL_MakeCurrent(window, glContext);
     version (OSX) {
-        configureMacOpenGLSurfaceOpacity(glContext);
+        if (glContext !is null) {
+            configureMacOpenGLSurfaceOpacity(glContext);
+        }
     }
-    auto glSupport = loadOpenGL();
-    enforce(glSupport >= GLSupport.gl32, "Failed to load OpenGL bindings (support="~glSupport.to!string~")");
-    SDL_GL_SetSwapInterval(1);
+
+    if (opts.loadOpenGLBindings) {
+        auto glSupport = loadOpenGL();
+        enforce(glSupport >= GLSupport.gl32, "Failed to load OpenGL bindings (support="~glSupport.to!string~")");
+    }
     // Ensure a known active texture unit before any texture API calls.
     glActiveTexture(GL_TEXTURE0);
 
     int drawableW = width;
     int drawableH = height;
-    SDL_GL_GetDrawableSize(window, &drawableW, &drawableH);
+    if (opts.drawableW > 0 && opts.drawableH > 0) {
+        drawableW = opts.drawableW;
+        drawableH = opts.drawableH;
+    }
 
     // Attach RenderBackend so nlshim Texture can allocate handles.
     inSetRenderBackend(new RenderBackend());
@@ -2446,7 +2440,7 @@ OpenGLBackendInit initOpenGLBackend(int width, int height, bool isTest) {
     currentRenderBackend().resizeViewportTargets(drawableW, drawableH);
 
     UnityResourceCallbacks cbs;
-    cbs.userData = window;
+    cbs.userData = opts.userData;
     cbs.createTexture = (int w, int h, int channels, int mipLevels, int format, bool renderTarget, bool stencil, void* userData) {
         size_t handle = gNextHandle++;
         // Disable mipmaps (min filter is linear-only) to ensure level 0 is displayed.
@@ -2482,6 +2476,12 @@ OpenGLBackendInit initOpenGLBackend(int width, int height, bool isTest) {
     };
 
     return OpenGLBackendInit(window, glContext, drawableW, drawableH, cbs);
+}
+
+/// Backward-compatible SDL-managed initializer.
+OpenGLBackendInit initOpenGLBackend(int width, int height, bool isTest) {
+    enforce(false, "Use initOpenGLBackend(..., OpenGLInitOptions) with host-managed context");
+    return OpenGLBackendInit(null, null, width, height, UnityResourceCallbacks.init);
 }
 
 // ==== Rendering pipeline ====

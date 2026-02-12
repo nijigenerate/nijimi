@@ -13,10 +13,6 @@ import core.sys.windows.com : CoInitializeEx, COINIT_MULTITHREADED;
 import core.sys.windows.windows : HANDLE, HWND, RECT, CloseHandle, CreateEventW, WaitForSingleObject, INFINITE, GetClientRect;
 import core.sys.windows.windef : HRESULT;
 
-import bindbc.sdl;
-import bindbc.sdl.dynload : loadedSDLVersion;
-import bindbc.sdl.bind.sdlsyswm : SDL_SysWMinfo, SDL_GetWindowWMInfo, SDL_SYSWM_WINDOWS;
-import bindbc.sdl.bind.sdlversion : SDL_VERSION;
 import aurora.directx.d3d12 : D3D12_HEAP_TYPE;
 import aurora.directx.com : DXPtr, uuidof;
 import aurora.directx.d3d.d3dcommon : D3D_PRIMITIVE_TOPOLOGY;
@@ -405,7 +401,8 @@ public:
 
 class RenderingBackend {
 public:
-    SDL_Window* window;
+    void* windowHandle;
+    HWND externalHwnd = null;
     int viewportW;
     int viewportH;
     SharedBufferSnapshot currentSnapshot;
@@ -1404,7 +1401,7 @@ float4 psMain(VSOutput input) : SV_TARGET {
             auto hrVs = D3DCompile(
                 shaderSource.ptr,
                 shaderSource.length,
-                "nijiv_dx12_shader",
+                "nijimi_dx12_shader",
                 null,
                 null,
                 "vsMain",
@@ -1429,7 +1426,7 @@ float4 psMain(VSOutput input) : SV_TARGET {
             auto hrPs = D3DCompile(
                 shaderSource.ptr,
                 shaderSource.length,
-                "nijiv_dx12_shader",
+                "nijimi_dx12_shader",
                 null,
                 null,
                 "psMain",
@@ -2548,27 +2545,18 @@ float4 psMain(VSOutput input) : SV_TARGET {
     DirectXRuntime dx;
 
 public:
-    this(SDL_Window* window) {
-        this.window = window;
+    this(void* windowHandle, HWND externalHwnd = null) {
+        this.windowHandle = windowHandle;
+        this.externalHwnd = externalHwnd;
         currentCompositeState = defaultCompositeState();
         maskFallbackTexture = new Texture(1, 1, 4, false, false);
         ubyte[4] white = [cast(ubyte)255, cast(ubyte)255, cast(ubyte)255, cast(ubyte)255];
         maskFallbackTexture.setData(white[], 4);
     }
 
-    static HWND requireWindowHandle(SDL_Window* window) {
-        SDL_SysWMinfo info = SDL_SysWMinfo.init;
-        SDL_VERSION(&info.version_);
-        enforce(SDL_GetWindowWMInfo(window, &info) == SDL_TRUE,
-            "SDL_GetWindowWMInfo failed: " ~ sdlError());
-        enforce(info.subsystem == SDL_SYSWM_WINDOWS,
-            "SDL backend is not Windows subsystem");
-        return cast(HWND)info.info.win.window;
-    }
-
     void initializeRenderer() {
-        dxTrace("RenderingBackend.initializeRenderer.requireWindowHandle");
-        auto hwnd = requireWindowHandle(window);
+        HWND hwnd = externalHwnd;
+        enforce(hwnd !is null, "DirectX backend requires a valid HWND");
         dxTrace("RenderingBackend.initializeRenderer.dx.initialize");
         dx.initialize(hwnd, max(1, viewportW), max(1, viewportH), gRuntimeOptions.debugLayer);
         dxTrace("RenderingBackend.initializeRenderer.dx.initialize.done");
@@ -2581,7 +2569,9 @@ public:
     void setViewport(int w, int h) {
         int targetW = w;
         int targetH = h;
-        queryWindowPixelSize(window, targetW, targetH);
+        if (externalHwnd !is null) {
+            queryWindowPixelSizeFromHwnd(externalHwnd, targetW, targetH);
+        }
         viewportW = targetW;
         viewportH = targetH;
         dx.resizeSwapChain(max(1, targetW), max(1, targetH));
@@ -3057,73 +3047,51 @@ public:
 }
 
 struct DirectXBackendInit {
-    SDL_Window* window;
+    void* windowHandle;
+    HWND hwnd;
     RenderingBackend backend;
     int drawableW;
     int drawableH;
     UnityResourceCallbacks callbacks;
 }
 
+struct DirectXInitOptions {
+    void* windowHandle = null;
+    HWND hwnd = null;
+    int drawableW = 0;
+    int drawableH = 0;
+    void* userData = null;
+}
+
 __gshared Texture[size_t] gTextures;
 __gshared size_t gNextHandle = 1;
 
-string sdlError() {
-    auto msg = SDL_GetError();
-    if (msg is null) return "unknown";
-    return fromStringz(msg).idup;
-}
-
-void queryWindowPixelSize(SDL_Window* window, out int w, out int h) {
+void queryWindowPixelSizeFromHwnd(HWND hwnd, out int w, out int h) {
     w = 1;
     h = 1;
-    if (window is null) return;
-
-    SDL_GetWindowSize(window, &w, &h);
-    if (w <= 0) w = 1;
-    if (h <= 0) h = 1;
-
-    SDL_SysWMinfo info = SDL_SysWMinfo.init;
-    SDL_VERSION(&info.version_);
-    if (SDL_GetWindowWMInfo(window, &info) == SDL_TRUE &&
-        info.subsystem == SDL_SYSWM_WINDOWS &&
-        info.info.win.window !is null)
-    {
-        RECT rc = RECT.init;
-        if (GetClientRect(cast(HWND)info.info.win.window, &rc) != 0) {
-            auto pw = rc.right - rc.left;
-            auto ph = rc.bottom - rc.top;
-            if (pw > 0) w = pw;
-            if (ph > 0) h = ph;
-        }
+    if (hwnd is null) return;
+    RECT rc = RECT.init;
+    if (GetClientRect(hwnd, &rc) != 0) {
+        auto pw = rc.right - rc.left;
+        auto ph = rc.bottom - rc.top;
+        if (pw > 0) w = pw;
+        if (ph > 0) h = ph;
     }
 }
 
-DirectXBackendInit initDirectXBackend(int width, int height, bool isTest) {
-    dxTrace("initDirectXBackend.loadSDL");
-    auto support = loadSDL();
-    version (OSX) {
-        if (support == SDLSupport.noLibrary || support == SDLSupport.badLibrary) {
-            support = loadSDL("/opt/homebrew/lib/libSDL2-2.0.0.dylib");
-        }
+DirectXBackendInit initDirectXBackend(int width, int height, bool isTest, DirectXInitOptions opts) {
+    auto window = opts.windowHandle;
+    HWND hwnd = opts.hwnd;
+    enforce(hwnd !is null, "DirectX backend init requires either SDL_Window* or HWND");
+
+    int drawableW = opts.drawableW > 0 ? opts.drawableW : width;
+    int drawableH = opts.drawableH > 0 ? opts.drawableH : height;
+    if (opts.drawableW <= 0 || opts.drawableH <= 0) {
+        queryWindowPixelSizeFromHwnd(hwnd, drawableW, drawableH);
     }
-    enforce(support >= SDLSupport.sdl206,
-        "Failed to load SDL2 (loaded=" ~ loadedSDLVersion().to!string ~ ")");
-    dxTrace("initDirectXBackend.SDL_Init");
-    enforce(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) == 0, "SDL_Init failed: " ~ sdlError());
-
-    dxTrace("initDirectXBackend.SDL_CreateWindow");
-    auto window = SDL_CreateWindow("nijiv",
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        width, height,
-        SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_SHOWN);
-    enforce(window !is null, "SDL_CreateWindow failed: " ~ sdlError());
-
-    int drawableW = width;
-    int drawableH = height;
-    queryWindowPixelSize(window, drawableW, drawableH);
 
     dxTrace("initDirectXBackend.new RenderingBackend");
-    auto backend = new RenderingBackend(window);
+    auto backend = new RenderingBackend(window, hwnd);
     backend.viewportW = max(1, drawableW);
     backend.viewportH = max(1, drawableH);
     dxTrace("initDirectXBackend.initializeRenderer");
@@ -3132,7 +3100,7 @@ DirectXBackendInit initDirectXBackend(int width, int height, bool isTest) {
     backend.setViewport(drawableW, drawableH);
 
     UnityResourceCallbacks cbs;
-    cbs.userData = window;
+    cbs.userData = opts.userData !is null ? opts.userData : cast(void*)hwnd;
     cbs.createTexture = (int w, int h, int channels, int mipLevels, int format, bool renderTarget, bool stencil, void* userData) {
         size_t handle = gNextHandle++;
         gTextures[handle] = new Texture(w, h, channels, stencil, renderTarget);
@@ -3155,7 +3123,12 @@ DirectXBackendInit initDirectXBackend(int width, int height, bool isTest) {
         }
     };
 
-    return DirectXBackendInit(window, backend, drawableW, drawableH, cbs);
+    return DirectXBackendInit(window, hwnd, backend, drawableW, drawableH, cbs);
+}
+
+DirectXBackendInit initDirectXBackend(int width, int height, bool isTest) {
+    enforce(false, "Use initDirectXBackend(..., DirectXInitOptions) with host-managed HWND");
+    return DirectXBackendInit(null, null, null, width, height, UnityResourceCallbacks.init);
 }
 
 void renderCommands(const DirectXBackendInit* dx,
@@ -3215,11 +3188,7 @@ void shutdownDirectXBackend(ref DirectXBackendInit dx) {
     }
     gTextures.clear();
     gNextHandle = 1;
-    if (dx.window !is null) {
-        SDL_DestroyWindow(dx.window);
-        dx.window = null;
-    }
-    SDL_Quit();
+    dx.windowHandle = null;
 }
 
 } // version (EnableDirectXBackend)

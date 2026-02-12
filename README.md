@@ -1,10 +1,10 @@
-# nijiv
+# nijimi
 
-`nijiv` is a sample host viewer that renders nijilive puppets through the **nijilive Unity DLL ABI (`njg*`)**.
+`nijimi` is a sample host viewer that renders nijilive puppets through the **nijilive Unity DLL ABI (`njg*`)**.
 
 This repository focuses on host-side integration:
 - load `libnijilive-unity` and bind exported C ABI symbols
-- create rendering context (SDL2 + OpenGL or Vulkan)
+- create rendering context (SDL3 + OpenGL or Vulkan)
 - receive command queue/shared buffers from DLL
 - execute rendering on the host backend
 
@@ -19,16 +19,16 @@ All backends are selectable with DUB configurations.
 ## DUB Configurations
 
 - `opengl`
-  - target: `nijiv-opengl`
+  - target: `nijimi-opengl`
   - backend dependency: `bindbc-opengl`
   - excludes: `source/vulkan/**`
 - `vulkan`
-  - target: `nijiv-vulkan`
+  - target: `nijimi-vulkan`
   - backend dependency: `erupted`
   - version flag: `EnableVulkanBackend`
   - excludes: `source/opengl/**`
 - `directx` (Windows)
-  - target: `nijiv-directx`
+  - target: `nijimi-directx`
   - backend dependency: `aurora-directx`
   - version flag: `EnableDirectXBackend`
   - excludes: `source/opengl/**`, `source/vulkan/**`
@@ -39,18 +39,18 @@ Common dependencies are kept at package root (SDL, math/image/support libs).
 
 - D toolchain (`ldc2` recommended)
 - `dub`
-- SDL2 runtime
+- SDL3 runtime
 - nijilive Unity library (`libnijilive-unity*`)
 - puppet file (`.inp` or `.inx`)
 
 Vulkan runtime requirements:
 - Vulkan loader + ICD (MoltenVK on macOS)
-- a valid Vulkan SDK/runtime environment when running `nijiv-vulkan`
+- a valid Vulkan SDK/runtime environment when running `nijimi-vulkan`
 
 ## Build Order
 
 1. Build nijilive Unity DLL (`libnijilive-unity*`)
-2. Build `nijiv` backend (`opengl` or `vulkan`)
+2. Build `nijimi` backend (`opengl` or `vulkan`)
 3. Run viewer
 
 ## Build nijilive Unity DLL
@@ -59,7 +59,7 @@ Expected layout:
 
 ```text
 .../nijigenerate/
-  nijiv/
+  nijimi/
   nijilive/
 ```
 
@@ -95,7 +95,7 @@ dub build --config unity-dll
 
 If `nijilive` does not provide a Linux unity-dll config in your checkout, prepare an equivalent `.so` build path on the nijilive side first.
 
-## Build nijiv
+## Build nijimi
 
 OpenGL:
 
@@ -120,19 +120,19 @@ dub build --config=directx
 OpenGL:
 
 ```bash
-./nijiv-opengl <puppet.inp|puppet.inx> [width height] [--test] [--frames N]
+./nijimi-opengl <puppet.inp|puppet.inx> [width height] [--test] [--frames N]
 ```
 
 Vulkan:
 
 ```bash
-./nijiv-vulkan <puppet.inp|puppet.inx> [width height] [--test] [--frames N]
+./nijimi-vulkan <puppet.inp|puppet.inx> [width height] [--test] [--frames N]
 ```
 
 DirectX (Windows):
 
 ```bash
-./nijiv-directx <puppet.inp|puppet.inx> [width height] [--test] [--frames N]
+./nijimi-directx <puppet.inp|puppet.inx> [width height] [--test] [--frames N]
 ```
 
 Notes:

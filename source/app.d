@@ -7,36 +7,28 @@ import std.file : exists, getcwd;
 import std.path : buildPath, dirName;
 import std.stdio : writeln, writefln, stderr;
 import std.string : fromStringz, toStringz, endsWith, toLower;
-import std.math : exp;
+import std.math : exp, sqrt, isNaN;
 import std.algorithm : clamp;
 
 version (Windows) {
+    import uilib.windows : configureTransparentWindow, WindowsTransparencyMode, windowsTransparencyMode;
     import core.sys.windows.windows : HMODULE, GetLastError, GetProcAddress;
-    import core.sys.windows.windows : HWND, BOOL, DWORD, LONG, HRGN, HRESULT;
-    pragma(lib, "dwmapi");
-
-    struct DWM_BLURBEHIND {
-        DWORD dwFlags;
-        BOOL fEnable;
-        HRGN hRgnBlur;
-        BOOL fTransitionOnMaximized;
+} else version (OSX) {
+    import uilib.osx : configureTransparentWindow;
+} else version (linux) {
+    import uilib.linux : configureTransparentWindow;
+} else {
+    void configureTransparentWindow(SDL_Window* window, void function(string) debugFn = null) {
     }
+}
 
-    struct MARGINS {
-        LONG cxLeftWidth;
-        LONG cxRightWidth;
-        LONG cyTopHeight;
-        LONG cyBottomHeight;
-    }
-
-    enum DWM_BB_ENABLE = 0x00000001;
-    extern (Windows) HRESULT DwmExtendFrameIntoClientArea(HWND hWnd, const(MARGINS)* pMarInset);
-    extern (Windows) HRESULT DwmEnableBlurBehindWindow(HWND hWnd, const(DWM_BLURBEHIND)* pBlurBehind);
-} else version (Posix) {
+version (Posix) {
     import core.sys.posix.dlfcn : dlsym, dlerror;
 }
 
 import bindbc.sdl;
+import uilib.sdl : configureWindowAlwaysOnTop, configureWindowBorderlessDesktop, configureWindowInputPolicy, initializeSystemTray, updateSystemTray, consumeTrayQuitRequested,
+    consumeTrayToggleRequested, setSystemTrayWindowVisible, shutdownSystemTray;
 
 version (EnableVulkanBackend) {
     import gfx = vulkan_backend;
@@ -71,6 +63,7 @@ alias FnRtInit = extern(C) void function();
 alias FnRtTerm = extern(C) void function();
 alias FnGetSharedBuffers = extern(C) gfx.NjgResult function(gfx.RendererHandle, gfx.SharedBufferSnapshot*);
 alias FnSetPuppetScale = extern(C) gfx.NjgResult function(gfx.PuppetHandle, float, float);
+alias FnSetPuppetTranslation = extern(C) gfx.NjgResult function(gfx.PuppetHandle, float, float);
 
 struct UnityApi {
     void* lib;
@@ -87,6 +80,7 @@ struct UnityApi {
     FnRtInit rtInit;
     FnRtTerm rtTerm;
     FnSetPuppetScale setPuppetScale;
+    FnSetPuppetTranslation setPuppetTranslation;
 }
 
 string dynamicLookupError() {
@@ -152,6 +146,7 @@ UnityApi loadUnityApi(string libPath) {
     api.setLogCallback = loadOptionalSymbol!FnSetLogCallback(lib, "njgSetLogCallback");
     api.getSharedBuffers = loadSymbol!FnGetSharedBuffers(lib, "njgGetSharedBuffers");
     api.setPuppetScale = loadOptionalSymbol!FnSetPuppetScale(lib, "njgSetPuppetScale");
+    api.setPuppetTranslation = loadOptionalSymbol!FnSetPuppetTranslation(lib, "njgSetPuppetTranslation");
     // Explicit runtime init/term provided by DLL.
     api.rtInit = loadOptionalSymbol!FnRtInit(lib, "njgRuntimeInit");
     api.rtTerm = loadOptionalSymbol!FnRtTerm(lib, "njgRuntimeTerm");
@@ -201,14 +196,6 @@ string resolvePuppetPath(string rawPath) {
     return rawPath;
 }
 
-bool isEnvEnabled(string name) {
-    import core.stdc.stdlib : getenv;
-    auto p = getenv(name.toStringz);
-    if (p is null) return false;
-    auto v = fromStringz(p).idup;
-    return v == "1" || v == "true" || v == "TRUE";
-}
-
 enum ToggleOption {
     Unspecified,
     Enabled,
@@ -221,6 +208,7 @@ struct CliOptions {
     ToggleOption transparentWindow = ToggleOption.Unspecified;
     ToggleOption transparentRetry = ToggleOption.Unspecified;
     ToggleOption transparentDebug = ToggleOption.Unspecified;
+    float dragSensitivity = 1.0f;
     string[] positional;
 }
 
@@ -232,50 +220,203 @@ private void transparentDebug(string message) {
     stderr.flush();
 }
 
-version (Windows) {
-    private enum WindowsTransparencyMode {
-        ColorKey,
-        Dwm,
-    }
 
-    private WindowsTransparencyMode windowsTransparencyMode() {
-        version (EnableVulkanBackend) {
-            // Vulkan + layered colorkey is unstable on Windows (often stays visible as magenta/black).
-            return WindowsTransparencyMode.Dwm;
-        } else {
-            return WindowsTransparencyMode.ColorKey;
-        }
-    }
-}
-
-private bool tryParseEnvBool(string name, out bool value) {
-    import core.stdc.stdlib : getenv;
-    auto p = getenv(name.toStringz);
-    if (p is null) return false;
-    auto v = fromStringz(p).idup.toLower();
-    if (v == "1" || v == "true" || v == "yes" || v == "on") {
-        value = true;
-        return true;
-    }
-    if (v == "0" || v == "false" || v == "no" || v == "off") {
-        value = false;
-        return true;
-    }
-    return false;
-}
-
-private bool resolveToggle(ToggleOption cliValue, string envName, bool defaultValue) {
+private bool resolveToggle(ToggleOption cliValue, bool defaultValue) {
     final switch (cliValue) {
         case ToggleOption.Enabled:
             return true;
         case ToggleOption.Disabled:
             return false;
         case ToggleOption.Unspecified:
-            bool envValue;
-            if (tryParseEnvBool(envName, envValue)) {
-                return envValue;
-            }
             return defaultValue;
+    }
+}
+
+private struct Vec4f {
+    float x;
+    float y;
+    float z;
+    float w;
+}
+
+private Vec4f mulMat4Vec4(ref const(float[16]) m, float x, float y, float z, float w) {
+    // Njg packet matrices are laid out column-major (OpenGL convention).
+    Vec4f r;
+    r.x = m[0] * x + m[4] * y + m[8]  * z + m[12] * w;
+    r.y = m[1] * x + m[5] * y + m[9]  * z + m[13] * w;
+    r.z = m[2] * x + m[6] * y + m[10] * z + m[14] * w;
+    r.w = m[3] * x + m[7] * y + m[11] * z + m[15] * w;
+    return r;
+}
+
+private struct PuppetScreenBounds {
+    bool valid;
+    float minX;
+    float minY;
+    float maxX;
+    float maxY;
+
+    void clear() {
+        valid = false;
+        minX = minY = maxX = maxY = 0;
+    }
+
+    void include(float x, float y) {
+        if (!valid) {
+            minX = maxX = x;
+            minY = maxY = y;
+            valid = true;
+            return;
+        }
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+    }
+
+    bool contains(float x, float y) const {
+        if (!valid) return false;
+        return x >= minX && x <= maxX && y >= minY && y <= maxY;
+    }
+}
+
+private struct DragLinearMap {
+    bool valid;
+    float m00;
+    float m01;
+    float m10;
+    float m11;
+    float c0;
+    float c1;
+}
+
+private bool clipDeltaToPuppetDelta(in DragLinearMap map, float clipDx, float clipDy, out float tx, out float ty) {
+    tx = 0;
+    ty = 0;
+    if (!map.valid) return false;
+    float det = map.m00 * map.m11 - map.m01 * map.m10;
+    if (det > -1e-7f && det < 1e-7f) return false;
+    float invDet = 1.0f / det;
+    tx = ( map.m11 * clipDx - map.m01 * clipDy) * invDet;
+    ty = (-map.m10 * clipDx + map.m00 * clipDy) * invDet;
+    return !(isNaN(tx) || isNaN(ty));
+}
+
+private bool clipPointToPuppetPoint(in DragLinearMap map, float clipX, float clipY, out float px, out float py) {
+    px = 0;
+    py = 0;
+    if (!map.valid) return false;
+    float det = map.m00 * map.m11 - map.m01 * map.m10;
+    if (det > -1e-7f && det < 1e-7f) return false;
+    float rhsX = clipX - map.c0;
+    float rhsY = clipY - map.c1;
+    float invDet = 1.0f / det;
+    px = ( map.m11 * rhsX - map.m01 * rhsY) * invDet;
+    py = (-map.m10 * rhsX + map.m00 * rhsY) * invDet;
+    return !(isNaN(px) || isNaN(py));
+}
+
+private bool screenToPuppetPoint(in DragLinearMap map,
+                                 float mouseX,
+                                 float mouseY,
+                                 int windowW,
+                                 int windowH,
+                                 int drawableW,
+                                 int drawableH,
+                                 out float px,
+                                 out float py) {
+    px = 0;
+    py = 0;
+    if (!map.valid) return false;
+    if (windowW <= 0 || windowH <= 0 || drawableW <= 0 || drawableH <= 0) return false;
+
+    float sx = mouseX * (cast(float)drawableW / cast(float)windowW);
+    float sy = mouseY * (cast(float)drawableH / cast(float)windowH);
+    float clipX = 2.0f * (sx / cast(float)drawableW) - 1.0f;
+    float clipY = 1.0f - 2.0f * (sy / cast(float)drawableH);
+    return clipPointToPuppetPoint(map, clipX, clipY, px, py);
+}
+
+private void includePartPacketBounds(ref PuppetScreenBounds bounds,
+                                     ref DragLinearMap dragMap,
+                                     ref bool dragMapSet,
+                                     ref const(gfx.NjgPartDrawPacket) packet,
+                                     ref const(gfx.SharedBufferSnapshot) snapshot,
+                                     int windowW,
+                                     int windowH) {
+    if (!packet.renderable || packet.indices is null || packet.indexCount == 0 || packet.vertexCount == 0) {
+        return;
+    }
+    if (windowW <= 0 || windowH <= 0) return;
+    if (snapshot.vertices.data is null || snapshot.vertices.length == 0) return;
+
+    if (!dragMapSet) {
+        dragMap.valid = true;
+        dragMap.m00 = packet.renderMatrix[0];
+        dragMap.m01 = packet.renderMatrix[4];
+        dragMap.m10 = packet.renderMatrix[1];
+        dragMap.m11 = packet.renderMatrix[5];
+        dragMap.c0 = packet.renderMatrix[12];
+        dragMap.c1 = packet.renderMatrix[13];
+        dragMapSet = true;
+    }
+
+    foreach (i; 0 .. packet.indexCount) {
+        auto vi = cast(size_t)packet.indices[i];
+        if (vi >= packet.vertexCount) continue;
+
+        auto vxBase = packet.vertexOffset + vi * packet.vertexAtlasStride;
+        if (vxBase + 1 >= snapshot.vertices.length) continue;
+        float vx = snapshot.vertices.data[vxBase];
+        float vy = snapshot.vertices.data[vxBase + 1];
+
+        float dx = 0;
+        float dy = 0;
+        auto dBase = packet.deformOffset + vi * packet.deformAtlasStride;
+        if (snapshot.deform.data !is null && dBase + 1 < snapshot.deform.length) {
+            dx = snapshot.deform.data[dBase];
+            dy = snapshot.deform.data[dBase + 1];
+        }
+
+        float px = vx - packet.origin.x + dx;
+        float py = vy - packet.origin.y + dy;
+        auto clip = mulMat4Vec4(packet.renderMatrix, px, py, 0, 1);
+        if (clip.w == 0 || isNaN(clip.w)) continue;
+        float invW = 1.0f / clip.w;
+        float ndcX = clip.x * invW;
+        float ndcY = clip.y * invW;
+
+        float sx = (ndcX * 0.5f + 0.5f) * cast(float)windowW;
+        float sy = (1.0f - (ndcY * 0.5f + 0.5f)) * cast(float)windowH;
+        bounds.include(sx, sy);
+    }
+}
+
+private void updatePuppetScreenBounds(ref PuppetScreenBounds bounds,
+                                      ref DragLinearMap dragMap,
+                                      ref const(gfx.CommandQueueView) view,
+                                      ref const(gfx.SharedBufferSnapshot) snapshot,
+                                      int windowW,
+                                      int windowH) {
+    bounds.clear();
+    dragMap.valid = false;
+    bool dragMapSet = false;
+    if (view.commands is null || view.count == 0) return;
+
+    auto commands = view.commands[0 .. view.count];
+    foreach (cmd; commands) {
+        switch (cmd.kind) {
+            case gfx.NjgRenderCommandKind.DrawPart:
+                includePartPacketBounds(bounds, dragMap, dragMapSet, cmd.partPacket, snapshot, windowW, windowH);
+                break;
+            case gfx.NjgRenderCommandKind.ApplyMask:
+                if (cmd.maskApplyPacket.kind == gfx.MaskDrawableKind.Part) {
+                    includePartPacketBounds(bounds, dragMap, dragMapSet, cmd.maskApplyPacket.partPacket, snapshot, windowW, windowH);
+                }
+                break;
+            default:
+                break;
+        }
     }
 }
 
@@ -323,305 +464,18 @@ private CliOptions parseCliOptions(string[] args) {
             out_.transparentDebug = ToggleOption.Disabled;
             continue;
         }
+        if (arg == "--drag-sensitivity") {
+            if (i + 1 < args.length) {
+                try {
+                    out_.dragSensitivity = args[i + 1].to!float;
+                } catch (Exception) {}
+                ++i;
+            }
+            continue;
+        }
         out_.positional ~= arg;
     }
     return out_;
-}
-
-void configureTransparentWindow(SDL_Window* window) {
-    if (window is null) {
-        transparentDebug("[transparent] skipped: window is null");
-        return;
-    }
-
-    version (Windows) {
-        import bindbc.sdl.bind.sdlsyswm : SDL_SysWMinfo, SDL_GetWindowWMInfo;
-        import bindbc.sdl.bind.sdlversion : SDL_VERSION;
-        import core.sys.windows.windows : HWND, BOOL, BYTE, DWORD, LONG_PTR, HRGN, HRESULT,
-            GWL_EXSTYLE, WS_EX_LAYERED, LWA_ALPHA, LWA_COLORKEY,
-            GetWindowLongPtrW, SetWindowLongPtrW, SetLayeredWindowAttributes;
-        auto mode = windowsTransparencyMode();
-        bool defaultDwmBlurBehind = false;
-        version (EnableVulkanBackend) {
-            defaultDwmBlurBehind = true;
-        }
-        bool useDwmBlurBehind = (mode == WindowsTransparencyMode.Dwm) &&
-            resolveToggle(ToggleOption.Unspecified, "NJIV_WINDOWS_BLUR_BEHIND", defaultDwmBlurBehind);
-
-        SDL_SysWMinfo info = SDL_SysWMinfo.init;
-        SDL_VERSION(&info.version_);
-        if (SDL_GetWindowWMInfo(window, &info) == SDL_TRUE &&
-            info.subsystem == SDL_SYSWM_TYPE.SDL_SYSWM_WINDOWS) {
-            auto hwnd = cast(HWND)info.info.win.window;
-            if (mode == WindowsTransparencyMode.ColorKey) {
-                auto exStyle = cast(LONG_PTR)GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-                auto nextStyle = exStyle | WS_EX_LAYERED;
-                if (nextStyle != exStyle) {
-                    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, nextStyle);
-                }
-                // RGB(255, 0, 255) becomes fully transparent. Use full-intensity key to avoid
-                // colorspace/quantization mismatches (notably Vulkan + sRGB swapchains).
-                DWORD colorKey = (cast(DWORD)255 << 16) | cast(DWORD)255;
-                SetLayeredWindowAttributes(hwnd, colorKey, cast(BYTE)255, LWA_COLORKEY);
-                transparentDebug("[transparent] windows: applied layered colorkey mode");
-            } else {
-                // DWM mode: avoid layered colorkey path, let compositor use swapchain alpha.
-                auto exStyle = cast(LONG_PTR)GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-                auto nextStyle = exStyle & ~cast(LONG_PTR)WS_EX_LAYERED;
-                if (nextStyle != exStyle) {
-                    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, nextStyle);
-                }
-                // Extend frame over the whole client area so backbuffer alpha can be composed.
-                MARGINS margins = MARGINS.init;
-                margins.cxLeftWidth = -1;
-                margins.cxRightWidth = -1;
-                margins.cyTopHeight = -1;
-                margins.cyBottomHeight = -1;
-                DwmExtendFrameIntoClientArea(hwnd, &margins);
-            }
-
-            if (mode == WindowsTransparencyMode.Dwm && useDwmBlurBehind) {
-                DWM_BLURBEHIND bb = DWM_BLURBEHIND.init;
-                bb.dwFlags = DWM_BB_ENABLE;
-                bb.fEnable = 1;
-                DwmEnableBlurBehindWindow(hwnd, &bb);
-                transparentDebug("[transparent] windows: applied layered + dwm blur-behind");
-            } else if (mode == WindowsTransparencyMode.Dwm) {
-                transparentDebug("[transparent] windows: applied layered alpha-only (no DWM blur)");
-            }
-        }
-    } else version (OSX) {
-        import bindbc.sdl.bind.sdlsyswm : SDL_SysWMinfo, SDL_GetWindowWMInfo;
-        import bindbc.sdl.bind.sdlversion : SDL_VERSION;
-        import core.sys.posix.dlfcn : dlopen, dlsym, RTLD_NOW, RTLD_LOCAL;
-
-        alias ObjcId = void*;
-        alias ObjcSel = void*;
-        alias ObjcBool = byte;
-        alias ObjcGetClassFn = extern(C) ObjcId function(const(char)*);
-        alias ObjcRegisterSelFn = extern(C) ObjcSel function(const(char)*);
-        alias MsgSendIdFn = extern(C) ObjcId function(ObjcId, ObjcSel);
-        alias MsgSendBoolFn = extern(C) void function(ObjcId, ObjcSel, ObjcBool);
-        alias MsgSendObjFn = extern(C) void function(ObjcId, ObjcSel, ObjcId);
-        alias MsgSendULongFn = extern(C) ulong function(ObjcId, ObjcSel);
-        alias MsgSendIndexObjFn = extern(C) ObjcId function(ObjcId, ObjcSel, ulong);
-        alias MsgSendBoolSelFn = extern(C) ObjcBool function(ObjcId, ObjcSel, ObjcSel);
-        alias MsgSendSetValuesFn = extern(C) void function(ObjcId, ObjcSel, const(int)*, int);
-
-        auto objcHandle = dlopen("/usr/lib/libobjc.A.dylib".toStringz, RTLD_NOW | RTLD_LOCAL);
-        if (objcHandle is null) {
-            transparentDebug("[transparent] macOS: failed to open /usr/lib/libobjc.A.dylib");
-            return;
-        }
-
-        auto objcGetClass = cast(ObjcGetClassFn)dlsym(objcHandle, "objc_getClass".toStringz);
-        auto selRegisterName = cast(ObjcRegisterSelFn)dlsym(objcHandle, "sel_registerName".toStringz);
-        auto objcMsgSendRaw = dlsym(objcHandle, "objc_msgSend".toStringz);
-        if (objcGetClass is null || selRegisterName is null || objcMsgSendRaw is null) {
-            transparentDebug("[transparent] macOS: objc runtime symbols not found");
-            return;
-        }
-
-        auto msgSendId = cast(MsgSendIdFn)objcMsgSendRaw;
-        auto msgSendBool = cast(MsgSendBoolFn)objcMsgSendRaw;
-        auto msgSendObj = cast(MsgSendObjFn)objcMsgSendRaw;
-        auto msgSendULong = cast(MsgSendULongFn)objcMsgSendRaw;
-        auto msgSendIndexObj = cast(MsgSendIndexObjFn)objcMsgSendRaw;
-        auto msgSendBoolSel = cast(MsgSendBoolSelFn)objcMsgSendRaw;
-        auto msgSendSetValues = cast(MsgSendSetValuesFn)objcMsgSendRaw;
-
-        SDL_SysWMinfo info = SDL_SysWMinfo.init;
-        SDL_VERSION(&info.version_);
-        if (SDL_GetWindowWMInfo(window, &info) != SDL_TRUE ||
-            info.subsystem != SDL_SYSWM_TYPE.SDL_SYSWM_COCOA) {
-            transparentDebug("[transparent] macOS: SDL_GetWindowWMInfo failed or non-COCOA subsystem=" ~ (cast(int)info.subsystem).to!string);
-            return;
-        }
-
-        auto nsWindow = cast(ObjcId)info.info.cocoa.window;
-        if (nsWindow is null) {
-            transparentDebug("[transparent] macOS: nsWindow is null");
-            return;
-        }
-
-        auto nsColorClass = objcGetClass("NSColor".toStringz);
-        if (nsColorClass is null) {
-            transparentDebug("[transparent] macOS: NSColor class not found");
-            return;
-        }
-
-        auto selClearColor = selRegisterName("clearColor".toStringz);
-        auto selCGColor = selRegisterName("CGColor".toStringz);
-        auto selContentView = selRegisterName("contentView".toStringz);
-        auto selSubviews = selRegisterName("subviews".toStringz);
-        auto selCount = selRegisterName("count".toStringz);
-        auto selObjectAtIndex = selRegisterName("objectAtIndex:".toStringz);
-        auto selLayer = selRegisterName("layer".toStringz);
-        auto selSublayers = selRegisterName("sublayers".toStringz);
-        auto selSetWantsLayer = selRegisterName("setWantsLayer:".toStringz);
-        auto selSetOpaque = selRegisterName("setOpaque:".toStringz);
-        auto selSetBackgroundColor = selRegisterName("setBackgroundColor:".toStringz);
-        auto selSetHasShadow = selRegisterName("setHasShadow:".toStringz);
-        auto selOpenGLContext = selRegisterName("openGLContext".toStringz);
-        auto selSetValuesForParameter = selRegisterName("setValues:forParameter:".toStringz);
-        auto selRespondsToSelector = selRegisterName("respondsToSelector:".toStringz);
-        if (selClearColor is null || selCGColor is null ||
-            selContentView is null || selSubviews is null || selCount is null || selObjectAtIndex is null ||
-            selLayer is null || selSublayers is null ||
-            selSetWantsLayer is null || selSetOpaque is null ||
-            selSetBackgroundColor is null || selSetHasShadow is null ||
-            selOpenGLContext is null || selSetValuesForParameter is null || selRespondsToSelector is null) {
-            transparentDebug("[transparent] macOS: selector lookup failed");
-            return;
-        }
-
-        auto clearColor = msgSendId(nsColorClass, selClearColor);
-        if (clearColor is null) {
-            transparentDebug("[transparent] macOS: [NSColor clearColor] returned null");
-            return;
-        }
-        auto clearCg = msgSendId(clearColor, selCGColor);
-
-        msgSendBool(nsWindow, selSetOpaque, cast(ObjcBool)0);
-        msgSendObj(nsWindow, selSetBackgroundColor, clearColor);
-        // Shadow darkens transparent edge pixels; disable by default.
-        msgSendBool(nsWindow, selSetHasShadow, cast(ObjcBool)0);
-
-        size_t touchedViews = 0;
-        size_t touchedLayers = 0;
-
-        void applyLayerTreeTransparency(ObjcId layer) {
-            if (layer is null) return;
-            touchedLayers++;
-            msgSendBool(layer, selSetOpaque, cast(ObjcBool)0);
-            if (clearCg !is null) {
-                msgSendObj(layer, selSetBackgroundColor, clearCg);
-            }
-            auto sublayers = msgSendId(layer, selSublayers);
-            if (sublayers is null) return;
-            auto subCount = msgSendULong(sublayers, selCount);
-            foreach (i; 0 .. subCount) {
-                auto sublayer = msgSendIndexObj(sublayers, selObjectAtIndex, cast(ulong)i);
-                applyLayerTreeTransparency(sublayer);
-            }
-        }
-
-        auto applyViewTransparency = (ObjcId view) {
-            if (view is null) return;
-            touchedViews++;
-            msgSendBool(view, selSetWantsLayer, cast(ObjcBool)1);
-            msgSendBool(view, selSetOpaque, cast(ObjcBool)0);
-            auto layer = msgSendId(view, selLayer);
-            applyLayerTreeTransparency(layer);
-        };
-
-        auto contentView = msgSendId(nsWindow, selContentView);
-        applyViewTransparency(contentView);
-        if (contentView !is null) {
-            auto subviews = msgSendId(contentView, selSubviews);
-            if (subviews !is null) {
-                auto subCount = msgSendULong(subviews, selCount);
-                foreach (i; 0 .. subCount) {
-                    auto subview = msgSendIndexObj(subviews, selObjectAtIndex, cast(ulong)i);
-                    applyViewTransparency(subview);
-                }
-            }
-        }
-
-        // OpenGL path only: request non-opaque context surface explicitly when available.
-        version (EnableVulkanBackend) {
-        } else {
-            if (contentView !is null) {
-                auto hasOpenGLContext = msgSendBoolSel(contentView, selRespondsToSelector, selOpenGLContext);
-                if (hasOpenGLContext != 0) {
-                    auto glctx = msgSendId(contentView, selOpenGLContext);
-                    if (glctx !is null) {
-                        enum NSOpenGLCPSurfaceOpacity = 236;
-                        int zero = 0;
-                        msgSendSetValues(glctx, selSetValuesForParameter, &zero, NSOpenGLCPSurfaceOpacity);
-                    }
-                }
-            }
-        }
-
-        transparentDebug("[transparent] macOS: applied non-opaque settings views=" ~ touchedViews.to!string ~ " layers=" ~ touchedLayers.to!string);
-    } else version (linux) {
-        import bindbc.sdl.bind.sdlsyswm : SDL_SysWMinfo, SDL_GetWindowWMInfo;
-        import bindbc.sdl.bind.sdlversion : SDL_VERSION;
-        import core.stdc.stdint : uint32_t;
-        import core.sys.posix.dlfcn : dlopen, dlsym, RTLD_NOW, RTLD_LOCAL;
-
-        alias XDisplay = void;
-        alias XWindow = ulong;
-        alias XAtom = ulong;
-        alias XBool = int;
-
-        alias XInternAtomFn = XAtom function(XDisplay* display, const(char)* atom_name, XBool only_if_exists);
-        alias XChangePropertyFn = int function(XDisplay* display,
-                                               XWindow w,
-                                               XAtom property,
-                                               XAtom type,
-                                               int format,
-                                               int mode,
-                                               const(ubyte)* data,
-                                               int nelements);
-        alias XFlushFn = int function(XDisplay* display);
-
-        enum PropModeReplace = 0;
-
-        SDL_SysWMinfo info = SDL_SysWMinfo.init;
-        SDL_VERSION(&info.version_);
-        if (SDL_GetWindowWMInfo(window, &info) != SDL_TRUE ||
-            info.subsystem != SDL_SYSWM_TYPE.SDL_SYSWM_X11) {
-            return;
-        }
-
-        auto x11 = dlopen("libX11.so.6".toStringz, RTLD_NOW | RTLD_LOCAL);
-        if (x11 is null) return;
-
-        auto xInternAtom = cast(XInternAtomFn)dlsym(x11, "XInternAtom".toStringz);
-        auto xChangeProperty = cast(XChangePropertyFn)dlsym(x11, "XChangeProperty".toStringz);
-        auto xFlush = cast(XFlushFn)dlsym(x11, "XFlush".toStringz);
-        if (xInternAtom is null || xChangeProperty is null || xFlush is null) return;
-
-        auto display = cast(XDisplay*)info.info.x11.display;
-        auto xwindow = cast(XWindow)info.info.x11.window;
-        if (display is null || xwindow == 0) return;
-
-        auto atomCardinal = xInternAtom(display, "CARDINAL".toStringz, 0);
-        if (atomCardinal == 0) return;
-
-        // Explicitly keep compositor path enabled so alpha visuals are respected.
-        auto atomBypass = xInternAtom(display, "_NET_WM_BYPASS_COMPOSITOR".toStringz, 0);
-        if (atomBypass != 0) {
-            uint32_t bypass = 0;
-            xChangeProperty(display,
-                            xwindow,
-                            atomBypass,
-                            atomCardinal,
-                            32,
-                            PropModeReplace,
-                            cast(const(ubyte)*)&bypass,
-                            1);
-        }
-
-        // Keep whole-window opacity at 1.0; per-pixel alpha still comes from rendering.
-        auto atomOpacity = xInternAtom(display, "_NET_WM_WINDOW_OPACITY".toStringz, 0);
-        if (atomOpacity != 0) {
-            uint32_t opacity = uint32_t.max;
-            xChangeProperty(display,
-                            xwindow,
-                            atomOpacity,
-                            atomCardinal,
-                            32,
-                            PropModeReplace,
-                            cast(const(ubyte)*)&opacity,
-                            1);
-        }
-
-        xFlush(display);
-        transparentDebug("[transparent] linux-x11: applied compositor/opacity window properties");
-    }
 }
 
 void main(string[] args) {
@@ -629,14 +483,11 @@ void main(string[] args) {
     bool isTest = cli.isTest;
     string[] positional = cli.positional;
     int framesFlag = cli.framesFlag;
-    import core.stdc.stdlib : getenv;
-    import std.string : fromStringz;
-    import std.conv : to;
     // Defaults for test mode
     int testMaxFrames = 5;
     auto testTimeout = 5.seconds;
     if (positional.length < 1) {
-        writeln("Usage: nijiv <puppet.inp|puppet.inx> [width height] [--test] [--transparent-window|--no-transparent-window] [--transparent-window-retry|--no-transparent-window-retry] [--transparent-debug]");
+        writeln("Usage: nijimi <puppet.inp|puppet.inx> [width height] [--test] [--transparent-window|--no-transparent-window] [--transparent-window-retry|--no-transparent-window-retry] [--transparent-debug] [--drag-sensitivity <value>]");
         return;
     }
     string puppetPath = resolvePuppetPath(positional[0]);
@@ -646,18 +497,10 @@ void main(string[] args) {
     bool hasHeight = positional.length > 2 && positional[2].all!isDigit;
     int width = hasWidth ? positional[1].to!int : 1280;
     int height = hasHeight ? positional[2].to!int : 720;
-    // Env overrides for capture/debug
-    if (auto p = getenv("NJIV_TEST_FRAMES")) {
-        try testMaxFrames = to!int(fromStringz(p)); catch (Exception) {}
-    }
     if (framesFlag > 0) testMaxFrames = framesFlag;
-    if (auto p = getenv("NJIV_TEST_TIMEOUT_MS")) {
-        import core.time : msecs;
-        try testTimeout = msecs(to!int(fromStringz(p))); catch (Exception) {}
-    }
-    gTransparentDebugLog = resolveToggle(cli.transparentDebug, "NJIV_TRANSPARENT_DEBUG", false);
-    bool transparentWindowEnabled = resolveToggle(cli.transparentWindow, "NJIV_TRANSPARENT_WINDOW", true);
-    bool transparentWindowRetry = resolveToggle(cli.transparentRetry, "NJIV_TRANSPARENT_WINDOW_RETRY", true);
+    gTransparentDebugLog = resolveToggle(cli.transparentDebug, false);
+    bool transparentWindowEnabled = resolveToggle(cli.transparentWindow, true);
+    bool transparentWindowRetry = resolveToggle(cli.transparentRetry, true);
     version (Windows) {
         version (EnableDirectXBackend) {
         } else {
@@ -677,7 +520,7 @@ void main(string[] args) {
         }
     }
 
-    writefln("nijiv (%s DLL) start: file=%s, size=%sx%s (test=%s frames=%s timeout=%s)",
+    writefln("nijimi (%s DLL) start: file=%s, size=%sx%s (test=%s frames=%s timeout=%s)",
         backendName, puppetPath, width, height, isTest, testMaxFrames, testTimeout);
     version (Windows) {
         auto mode = windowsTransparencyMode();
@@ -685,31 +528,140 @@ void main(string[] args) {
     }
     transparentDebug("[transparent] option enabled=" ~ transparentWindowEnabled.to!string ~ " retry=" ~ transparentWindowRetry.to!string);
 
+    import bindbc.loader : LoadMsg;
+    auto sdlSupport = loadSDL();
+    if (sdlSupport == LoadMsg.noLibrary || sdlSupport == LoadMsg.badLibrary) {
+        version (OSX) {
+            sdlSupport = loadSDL("/opt/homebrew/lib/libSDL3.0.dylib");
+        }
+    }
+    enforce(sdlSupport == LoadMsg.success, "Failed to load SDL3");
+    SDL_SetMainReady();
+    enforce(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS),
+        "SDL_Init failed: " ~ (SDL_GetError() is null ? "" : fromStringz(SDL_GetError()).idup));
+
+    SDL_Window* hostWindow = null;
+    void* hostGlContext = null;
     BackendInit backendInit = void;
+    scope (exit) {
+        shutdownSystemTray();
+        version (EnableDirectXBackend) {
+            gfx.shutdownDirectXBackend(backendInit);
+        } else version (EnableVulkanBackend) {
+            if (backendInit.backend !is null) backendInit.backend.dispose();
+        }
+        if (hostGlContext !is null) {
+            SDL_GL_DestroyContext(cast(SDL_GLContext)hostGlContext);
+            hostGlContext = null;
+        }
+        if (hostWindow !is null) {
+            SDL_DestroyWindow(hostWindow);
+            hostWindow = null;
+        }
+        SDL_Quit();
+    }
+
     version (EnableVulkanBackend) {
-        backendInit = gfx.initVulkanBackend(width, height, isTest);
-        scope (exit) {
-            if (backendInit.backend !is null) backendInit.backend.dispose();
-            if (backendInit.window !is null) SDL_DestroyWindow(backendInit.window);
-            SDL_Quit();
+        import erupted : VkInstance, VkSurfaceKHR;
+
+        hostWindow = SDL_CreateWindow("nijimi",
+            width, height,
+            SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+        enforce(hostWindow !is null, "SDL_CreateWindow failed (vulkan)");
+        configureWindowBorderlessDesktop(hostWindow, &transparentDebug);
+        configureWindowAlwaysOnTop(hostWindow, true);
+        configureWindowInputPolicy(hostWindow, false, &transparentDebug);
+
+        int drawableW = width;
+        int drawableH = height;
+        SDL_GetWindowSizeInPixels(hostWindow, &drawableW, &drawableH);
+
+        uint extCount = 0;
+        auto extPtrs = SDL_Vulkan_GetInstanceExtensions(&extCount);
+        enforce(extPtrs !is null && extCount > 0, "SDL_Vulkan_GetInstanceExtensions failed");
+        string[] instExts;
+        instExts.length = extCount;
+        foreach (i; 0 .. extCount) {
+            instExts[i] = fromStringz(extPtrs[i]).idup;
         }
-        SDL_Vulkan_GetDrawableSize(backendInit.window, &backendInit.drawableW, &backendInit.drawableH);
+
+        gfx.VulkanInitOptions opts;
+        opts.windowHandle = cast(void*)hostWindow;
+        opts.drawableW = drawableW;
+        opts.drawableH = drawableH;
+        opts.instanceExtensions = instExts;
+        opts.ownsSurface = true;
+        opts.surfaceFactory = (VkInstance instance, void* userData) {
+            auto w = cast(SDL_Window*)userData;
+            ulong outSurface = 0;
+            auto ok = SDL_Vulkan_CreateSurface(w, instance, null, &outSurface);
+            return ok ? cast(VkSurfaceKHR)outSurface : VkSurfaceKHR.init;
+        };
+        opts.surfaceFactoryUserData = cast(void*)hostWindow;
+        backendInit = gfx.initVulkanBackend(width, height, isTest, opts);
+        backendInit.drawableW = drawableW;
+        backendInit.drawableH = drawableH;
     } else version (EnableDirectXBackend) {
-        backendInit = gfx.initDirectXBackend(width, height, isTest);
-        scope (exit) {
-            if (backendInit.backend !is null) backendInit.backend.dispose();
-            if (backendInit.window !is null) SDL_DestroyWindow(backendInit.window);
-            SDL_Quit();
-        }
-        SDL_GetWindowSize(backendInit.window, &backendInit.drawableW, &backendInit.drawableH);
+        import core.sys.windows.windows : HWND;
+
+        hostWindow = SDL_CreateWindow("nijimi",
+            width, height,
+            SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+        enforce(hostWindow !is null, "SDL_CreateWindow failed (directx)");
+        configureWindowBorderlessDesktop(hostWindow, &transparentDebug);
+        configureWindowAlwaysOnTop(hostWindow, true);
+        configureWindowInputPolicy(hostWindow, false, &transparentDebug);
+
+        auto props = SDL_GetWindowProperties(hostWindow);
+        auto hwnd = cast(HWND)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, null);
+        enforce(hwnd !is null, "Failed to get HWND from SDL window properties");
+
+        int drawableW = width;
+        int drawableH = height;
+        SDL_GetWindowSizeInPixels(hostWindow, &drawableW, &drawableH);
+
+        gfx.DirectXInitOptions opts;
+        opts.windowHandle = cast(void*)hostWindow;
+        opts.hwnd = hwnd;
+        opts.drawableW = drawableW;
+        opts.drawableH = drawableH;
+        opts.userData = cast(void*)hostWindow;
+        backendInit = gfx.initDirectXBackend(width, height, isTest, opts);
+        backendInit.drawableW = drawableW;
+        backendInit.drawableH = drawableH;
     } else {
-        backendInit = gfx.initOpenGLBackend(width, height, isTest);
-        scope (exit) {
-            if (backendInit.glContext !is null) SDL_GL_DeleteContext(backendInit.glContext);
-            if (backendInit.window !is null) SDL_DestroyWindow(backendInit.window);
-            SDL_Quit();
-        }
-        SDL_GL_GetDrawableSize(backendInit.window, &backendInit.drawableW, &backendInit.drawableH);
+        hostWindow = SDL_CreateWindow("nijimi",
+            width, height,
+            SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+        enforce(hostWindow !is null, "SDL_CreateWindow failed (opengl)");
+        configureWindowBorderlessDesktop(hostWindow, &transparentDebug);
+        configureWindowAlwaysOnTop(hostWindow, true);
+        configureWindowInputPolicy(hostWindow, false, &transparentDebug);
+
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+        SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+        SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
+        hostGlContext = cast(void*)SDL_GL_CreateContext(hostWindow);
+        enforce(hostGlContext !is null, "SDL_GL_CreateContext failed");
+        SDL_GL_MakeCurrent(hostWindow, cast(SDL_GLContext)hostGlContext);
+        SDL_GL_SetSwapInterval(1);
+
+        int drawableW = width;
+        int drawableH = height;
+        SDL_GetWindowSizeInPixels(hostWindow, &drawableW, &drawableH);
+
+        gfx.OpenGLInitOptions opts;
+        opts.windowHandle = cast(void*)hostWindow;
+        opts.glContextHandle = hostGlContext;
+        opts.drawableW = drawableW;
+        opts.drawableH = drawableH;
+        opts.userData = cast(void*)hostWindow;
+        backendInit = gfx.initOpenGLBackend(width, height, isTest, opts);
+        backendInit.drawableW = drawableW;
+        backendInit.drawableH = drawableH;
     }
 
     bool canApplyTransparentWindow = transparentWindowEnabled;
@@ -722,8 +674,11 @@ void main(string[] args) {
         }
     }
     if (canApplyTransparentWindow) {
-        configureTransparentWindow(backendInit.window);
+        configureTransparentWindow(hostWindow, &transparentDebug);
     }
+    initializeSystemTray(hostWindow, &transparentDebug);
+    bool trayWindowVisible = true;
+    setSystemTrayWindowVisible(trayWindowVisible);
     bool transparencyRetryPending = canApplyTransparentWindow && transparentWindowRetry;
 
     // Load the Unity-facing DLL from a nearby nijilive build.
@@ -774,6 +729,18 @@ void main(string[] args) {
         currentRenderBackend().setViewport(backendInit.drawableW, backendInit.drawableH);
     }
     float puppetScale = 0.12f;
+    float puppetTranslateX = 0.0f;
+    float puppetTranslateY = 0.0f;
+    bool dragMoveActive = false;
+    bool dragAnchorValid = false;
+    float dragLastX = 0.0f;
+    float dragLastY = 0.0f;
+    float dragAnchorScreenX = 0.0f;
+    float dragAnchorScreenY = 0.0f;
+    float dragAnchorTranslationX = 0.0f;
+    float dragAnchorTranslationY = 0.0f;
+    PuppetScreenBounds puppetBounds = PuppetScreenBounds.init;
+    DragLinearMap dragMap = DragLinearMap.init;
 
     // Apply initial scale (default 0.25) so that the view starts zoomed out.
     if (api.setPuppetScale !is null) {
@@ -783,20 +750,10 @@ void main(string[] args) {
         }
     }
 
-    bool autoWheel = isEnvEnabled("NJIV_AUTO_WHEEL");
+    bool autoWheel = false;
     int autoWheelInterval = 3;
-    if (auto p = getenv("NJIV_AUTO_WHEEL_INTERVAL")) {
-        try {
-            autoWheelInterval = to!int(fromStringz(p));
-        } catch (Exception) {}
-    }
     if (autoWheelInterval <= 0) autoWheelInterval = 3;
     int autoWheelPhaseTicks = 18;
-    if (auto p = getenv("NJIV_AUTO_WHEEL_PHASE_TICKS")) {
-        try {
-            autoWheelPhaseTicks = to!int(fromStringz(p));
-        } catch (Exception) {}
-    }
     if (autoWheelPhaseTicks <= 0) autoWheelPhaseTicks = 18;
     int autoWheelY = 1;
     int autoWheelPhaseCount = 0;
@@ -804,6 +761,8 @@ void main(string[] args) {
         writefln("Auto wheel enabled: interval=%s phaseTicks=%s startY=%s",
             autoWheelInterval, autoWheelPhaseTicks, autoWheelY);
     }
+    float dragSensitivity = cli.dragSensitivity;
+    if (dragSensitivity <= 0.0f) dragSensitivity = 1.0f;
 
     bool running = true;
     int frameCount = 0;
@@ -812,29 +771,30 @@ void main(string[] args) {
     SDL_Event ev;
 
     while (running) {
+        updateSystemTray();
         while (SDL_PollEvent(&ev) != 0) {
             switch (cast(uint)ev.type) {
-                case SDL_QUIT:
+                case SDL_EVENT_QUIT:
                     running = false;
                     break;
-                case SDL_KEYDOWN:
-                    if (ev.key.keysym.scancode == SDL_SCANCODE_ESCAPE) running = false;
+                case SDL_EVENT_KEY_DOWN:
+                    if (ev.key.scancode == SDL_SCANCODE_ESCAPE) running = false;
                     break;
-                case SDL_WINDOWEVENT:
-                    if (ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
-                        ev.window.event == SDL_WINDOWEVENT_RESIZED) {
+                case SDL_EVENT_WINDOW_RESIZED:
+                case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+                    {
                         version (EnableVulkanBackend) {
-                            SDL_Vulkan_GetDrawableSize(backendInit.window, &backendInit.drawableW, &backendInit.drawableH);
+                            SDL_GetWindowSizeInPixels(hostWindow, &backendInit.drawableW, &backendInit.drawableH);
                             frameCfg.viewportWidth = backendInit.drawableW;
                             frameCfg.viewportHeight = backendInit.drawableH;
                             backendInit.backend.setViewport(backendInit.drawableW, backendInit.drawableH);
                         } else version (EnableDirectXBackend) {
-                            SDL_GetWindowSize(backendInit.window, &backendInit.drawableW, &backendInit.drawableH);
+                            SDL_GetWindowSizeInPixels(hostWindow, &backendInit.drawableW, &backendInit.drawableH);
                             frameCfg.viewportWidth = backendInit.drawableW;
                             frameCfg.viewportHeight = backendInit.drawableH;
                             backendInit.backend.setViewport(backendInit.drawableW, backendInit.drawableH);
                         } else {
-                            SDL_GL_GetDrawableSize(backendInit.window, &backendInit.drawableW, &backendInit.drawableH);
+                            SDL_GetWindowSizeInPixels(hostWindow, &backendInit.drawableW, &backendInit.drawableH);
                             frameCfg.viewportWidth = backendInit.drawableW;
                             frameCfg.viewportHeight = backendInit.drawableH;
                             currentRenderBackend().setViewport(backendInit.drawableW, backendInit.drawableH);
@@ -842,11 +802,19 @@ void main(string[] args) {
                         if (canApplyTransparentWindow) {
                             // SDL may recreate native view/layer objects on resize.
                             // Re-apply transparency settings to keep alpha compositing active.
-                            configureTransparentWindow(backendInit.window);
+                            configureTransparentWindow(hostWindow, &transparentDebug);
                         }
                     }
                     break;
-                case SDL_MOUSEWHEEL:
+                case SDL_EVENT_WINDOW_SHOWN:
+                    trayWindowVisible = true;
+                    setSystemTrayWindowVisible(true);
+                    break;
+                case SDL_EVENT_WINDOW_HIDDEN:
+                    trayWindowVisible = false;
+                    setSystemTrayWindowVisible(false);
+                    break;
+                case SDL_EVENT_MOUSE_WHEEL:
                     // Scroll up to zoom in, down to zoom out. Use exponential step.
                     {
                         float step = 0.1f; // ~10% per notch
@@ -857,11 +825,104 @@ void main(string[] args) {
                             if (res != gfx.NjgResult.Ok) {
                                 writeln("njgSetPuppetScale failed: ", res);
                             }
+                            if (dragMoveActive) {
+                                // Scale changed while dragging: re-anchor on next motion with fresh transform.
+                                dragAnchorValid = false;
+                            }
+                        }
+                    }
+                    break;
+                case SDL_EVENT_MOUSE_BUTTON_DOWN:
+                    if (ev.button.button == SDL_MouseButton.left) {
+                        // Colorkey transparency on Windows generally forwards clicks only on visible pixels.
+                        // Start drag unconditionally on left click so translation always responds.
+                        dragMoveActive = true;
+                        dragLastX = ev.button.x;
+                        dragLastY = ev.button.y;
+                        SDL_CaptureMouse(true);
+                        dragAnchorValid = true;
+                        dragAnchorScreenX = ev.button.x;
+                        dragAnchorScreenY = ev.button.y;
+                        dragAnchorTranslationX = puppetTranslateX;
+                        dragAnchorTranslationY = puppetTranslateY;
+                    }
+                    break;
+                case SDL_EVENT_MOUSE_BUTTON_UP:
+                    if (ev.button.button == SDL_MouseButton.left) {
+                        dragMoveActive = false;
+                        dragAnchorValid = false;
+                        SDL_CaptureMouse(false);
+                    }
+                    break;
+                case SDL_EVENT_MOUSE_MOTION:
+                    if (dragMoveActive && api.setPuppetTranslation !is null) {
+                        if (!dragAnchorValid && dragMap.valid) {
+                            dragAnchorValid = true;
+                            dragAnchorScreenX = ev.motion.x;
+                            dragAnchorScreenY = ev.motion.y;
+                            dragAnchorTranslationX = puppetTranslateX;
+                            dragAnchorTranslationY = puppetTranslateY;
+                            dragLastX = ev.motion.x;
+                            dragLastY = ev.motion.y;
+                            break;
+                        }
+
+                        float dx = ev.motion.x - dragLastX;
+                        float dy = ev.motion.y - dragLastY;
+                        dragLastX = ev.motion.x;
+                        dragLastY = ev.motion.y;
+
+                        float tdx = dx * dragSensitivity;
+                        float tdy = dy * dragSensitivity;
+                        if (dragAnchorValid && dragMap.valid) {
+                            int windowW = 0;
+                            int windowH = 0;
+                            int winDrawableW = 0;
+                            int winDrawableH = 0;
+                            SDL_GetWindowSize(hostWindow, &windowW, &windowH);
+                            SDL_GetWindowSizeInPixels(hostWindow, &winDrawableW, &winDrawableH);
+                            float anchorPx, anchorPy;
+                            float nowPx, nowPy;
+                            bool okAnchor = screenToPuppetPoint(dragMap, dragAnchorScreenX, dragAnchorScreenY,
+                                windowW, windowH, winDrawableW, winDrawableH, anchorPx, anchorPy);
+                            bool okNow = screenToPuppetPoint(dragMap, ev.motion.x, ev.motion.y,
+                                windowW, windowH, winDrawableW, winDrawableH, nowPx, nowPy);
+                            if (okAnchor && okNow) {
+                                tdx = (nowPx - anchorPx) * dragSensitivity;
+                                tdy = (nowPy - anchorPy) * dragSensitivity;
+                                puppetTranslateX = dragAnchorTranslationX + tdx;
+                                puppetTranslateY = dragAnchorTranslationY + tdy;
+                            } else {
+                                puppetTranslateX += tdx;
+                                puppetTranslateY += tdy;
+                            }
+                        } else {
+                            puppetTranslateX += tdx;
+                            puppetTranslateY += tdy;
+                        }
+                        auto res = api.setPuppetTranslation(puppet, puppetTranslateX, puppetTranslateY);
+                        if (res != gfx.NjgResult.Ok) {
+                            writeln("njgSetPuppetTranslation failed: ", res);
                         }
                     }
                     break;
                 default:
                     break;
+            }
+        }
+        if (consumeTrayQuitRequested()) {
+            running = false;
+        }
+        if (consumeTrayToggleRequested()) {
+            if (trayWindowVisible) {
+                SDL_HideWindow(hostWindow);
+                trayWindowVisible = false;
+                setSystemTrayWindowVisible(false);
+            } else {
+                SDL_ShowWindow(hostWindow);
+                SDL_RaiseWindow(hostWindow);
+                trayWindowVisible = true;
+                setSystemTrayWindowVisible(true);
             }
         }
         if (!running) {
@@ -881,6 +942,9 @@ void main(string[] args) {
             float factor = cast(float)exp(step * -wheelY);
             puppetScale = clamp(puppetScale * factor, 0.1f, 10.0f);
             auto res = api.setPuppetScale(puppet, puppetScale, puppetScale);
+            if (dragMoveActive) {
+                dragAnchorValid = false;
+            }
             writefln("Auto wheel frame=%s -> wheelY=%s scale=%s res=%s",
                 frameCount, wheelY, puppetScale, res);
         }
@@ -897,24 +961,25 @@ void main(string[] args) {
         enforce(api.emitCommands(renderer, &view) == gfx.NjgResult.Ok, "njgEmitCommands failed");
         gfx.SharedBufferSnapshot snapshot;
         enforce(api.getSharedBuffers(renderer, &snapshot) == gfx.NjgResult.Ok, "njgGetSharedBuffers failed");
+        int windowW = 0;
+        int windowH = 0;
+        SDL_GetWindowSize(hostWindow, &windowW, &windowH);
+        updatePuppetScreenBounds(puppetBounds, dragMap, view, snapshot, windowW, windowH);
 
         gfx.renderCommands(&backendInit, &snapshot, &view);
 
         // Some SDL backends create/replace native subviews lazily after first render.
         // Re-apply transparency once to catch late-created view/layer objects.
         if (transparencyRetryPending) {
-            configureTransparentWindow(backendInit.window);
+            configureTransparentWindow(hostWindow, &transparentDebug);
             transparencyRetryPending = false;
         }
 
-        if (isEnvEnabled("NJIV_SKIP_FLUSH")) {
-        } else {
-            api.flushCommands(renderer);
-        }
+        api.flushCommands(renderer);
         version (EnableVulkanBackend) {
         } else version (EnableDirectXBackend) {
         } else {
-            SDL_GL_SwapWindow(backendInit.window);
+            SDL_GL_SwapWindow(hostWindow);
         }
 
         frameCount++;
@@ -927,10 +992,6 @@ void main(string[] args) {
             writefln("Exit: elapsed %s > test-timeout %s", elapsed.total!"seconds", testTimeout.total!"seconds");
             break;
         }
-    }
-
-    version (EnableDirectXBackend) {
-        gfx.shutdownDirectXBackend(backendInit);
     }
 
     api.unloadPuppet(renderer, puppet);

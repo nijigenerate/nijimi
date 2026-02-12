@@ -8,7 +8,6 @@ import std.algorithm.searching : canFind;
 import std.conv : to;
 import std.exception : enforce;
 import std.math : isNaN;
-import std.process : environment;
 import std.stdio : writeln;
 import std.string : fromStringz, toStringz;
 import core.thread : thread_attachThis;
@@ -17,9 +16,6 @@ import core.stdc.string : memcpy;
 import core.stdc.stdint : uint32_t;
 import core.stdc.stdio : fprintf, stderr;
 
-import bindbc.sdl;
-import bindbc.sdl.bind.sdlvulkan;
-import bindbc.sdl.dynload : loadedSDLVersion;
 
 import erupted;
 import erupted.vulkan_lib_loader;
@@ -200,11 +196,29 @@ extern(C) struct UnityResourceCallbacks {
 }
 
 struct VulkanBackendInit {
-    SDL_Window* window;
+    void* windowHandle;
     RenderingBackend backend;
     int drawableW;
     int drawableH;
+    bool ownsWindow;
+    bool ownsSDL;
+    bool ownsSurface;
     UnityResourceCallbacks callbacks;
+}
+
+alias SurfaceFactoryFn = VkSurfaceKHR function(VkInstance instance, void* userData);
+
+struct VulkanInitOptions {
+    bool ownsWindow = false;
+    bool ownsSDL = false;
+    bool ownsSurface = false;
+    void* windowHandle = null;
+    int drawableW = 0;
+    int drawableH = 0;
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
+    SurfaceFactoryFn surfaceFactory = null;
+    void* surfaceFactoryUserData = null;
+    string[] instanceExtensions;
 }
 
 struct Vertex {
@@ -335,11 +349,6 @@ private void flushPendingTextureReleases() {
     }
 }
 
-private string sdlError() {
-    auto err = SDL_GetError();
-    return err is null ? "" : fromStringz(err).idup;
-}
-
 private void vkEnforce(VkResult result, string message) {
     enforce(result == VK_SUCCESS, message ~ " (VkResult=" ~ result.to!string ~ ")");
 }
@@ -369,13 +378,8 @@ private VkCompositeAlphaFlagBitsKHR chooseCompositeAlpha(VkCompositeAlphaFlagsKH
     return VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
 }
 
-private bool envEnabled(string name) {
-    auto value = environment.get(name, "");
-    return value == "1" || value == "true" || value == "TRUE";
-}
-
 private bool diagEnabled() {
-    return envEnabled("NJIV_VK_DIAG");
+    return false;
 }
 
 private void diagStderr(string msg) {
@@ -474,8 +478,14 @@ private:
         ulong revision;
     }
 
-    SDL_Window* window;
+    void* windowHandle;
     bool isTest;
+    bool ownsSurface = true;
+    SurfaceFactoryFn surfaceFactory = null;
+    void* surfaceFactoryUserData = null;
+    string[] externalInstanceExtensions;
+    int requestedDrawableW = 1;
+    int requestedDrawableH = 1;
 
     VkInstance instance;
     bool validationEnabled;
@@ -561,9 +571,24 @@ private:
     const(SharedBufferSnapshot)* currentSnapshot;
 
 public:
-    this(SDL_Window* window, bool isTest) {
-        this.window = window;
+    this(void* windowHandle,
+         bool isTest,
+         VkSurfaceKHR externalSurface = VK_NULL_HANDLE,
+         bool ownsSurface = true,
+         SurfaceFactoryFn surfaceFactory = null,
+         void* surfaceFactoryUserData = null,
+         string[] instanceExtensions = null,
+         int drawableW = 1,
+         int drawableH = 1) {
+        this.windowHandle = windowHandle;
         this.isTest = isTest;
+        this.surface = externalSurface;
+        this.ownsSurface = ownsSurface;
+        this.surfaceFactory = surfaceFactory;
+        this.surfaceFactoryUserData = surfaceFactoryUserData;
+        this.externalInstanceExtensions = instanceExtensions.dup;
+        this.requestedDrawableW = max(1, drawableW);
+        this.requestedDrawableH = max(1, drawableH);
     }
 
     ~this() {
@@ -598,7 +623,7 @@ public:
             vkDestroyDebugUtilsMessengerEXT(instance, debugMessenger, null);
         }
         if (device != VK_NULL_HANDLE) vkDestroyDevice(device, null);
-        if (surface != VK_NULL_HANDLE) vkDestroySurfaceKHR(instance, surface, null);
+        if (ownsSurface && surface != VK_NULL_HANDLE) vkDestroySurfaceKHR(instance, surface, null);
         if (instance != VK_NULL_HANDLE) vkDestroyInstance(instance, null);
 
         imageAvailable[] = VK_NULL_HANDLE;
@@ -634,6 +659,8 @@ public:
 
     void setViewport(int width, int height) {
         if (width <= 0 || height <= 0) return;
+        requestedDrawableW = width;
+        requestedDrawableH = height;
         if (swapchainExtent.width == cast(uint)width && swapchainExtent.height == cast(uint)height) {
             return;
         }
@@ -999,22 +1026,11 @@ public:
 
 private:
     void createInstance() {
-        validationEnabled = envEnabled("NJIV_VK_VALIDATION");
+        validationEnabled = false;
 
-        uint extCount = 0;
-        enforce(SDL_Vulkan_GetInstanceExtensions(window, &extCount, null) == SDL_TRUE,
-            "SDL_Vulkan_GetInstanceExtensions (count) failed");
-
-        const(char)*[] extPtrs;
-        extPtrs.length = extCount;
-        enforce(SDL_Vulkan_GetInstanceExtensions(window, &extCount, cast(const(char)**)extPtrs.ptr) == SDL_TRUE,
-            "SDL_Vulkan_GetInstanceExtensions failed");
-
-        string[] extNames;
-        extNames.length = extCount;
-        foreach (i; 0 .. extCount) {
-            extNames[i] = fromStringz(extPtrs[i]).idup;
-        }
+        string[] extNames = externalInstanceExtensions.dup;
+        enforce(extNames.length > 0,
+            "Vulkan init requires instanceExtensions in VulkanInitOptions");
 
         version (OSX) {
             if (!extNames.canFind("VK_KHR_portability_enumeration")) {
@@ -1064,9 +1080,9 @@ private:
 
         VkApplicationInfo appInfo;
         appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-        appInfo.pApplicationName = "nijiv-vulkan".toStringz();
+        appInfo.pApplicationName = "nijimi-vulkan".toStringz();
         appInfo.applicationVersion = VK_API_VERSION_1_0;
-        appInfo.pEngineName = "nijiv".toStringz();
+        appInfo.pEngineName = "nijimi".toStringz();
         appInfo.engineVersion = VK_API_VERSION_1_0;
         appInfo.apiVersion = VK_API_VERSION_1_0;
 
@@ -1106,8 +1122,15 @@ private:
     }
 
     void createSurface() {
-        auto ok = SDL_Vulkan_CreateSurface(window, instance, cast(VkSurfaceKHR*)&surface);
-        enforce(ok == SDL_TRUE, "SDL_Vulkan_CreateSurface failed: " ~ sdlError());
+        if (surface != VK_NULL_HANDLE) {
+            return;
+        }
+        if (surfaceFactory !is null) {
+            surface = surfaceFactory(instance, surfaceFactoryUserData);
+            enforce(surface != VK_NULL_HANDLE, "External Vulkan surface factory returned null surface");
+            return;
+        }
+        enforce(false, "Vulkan surface must be provided by host (surface or surfaceFactory)");
     }
 
     void pickPhysicalDevice() {
@@ -1157,20 +1180,12 @@ private:
     }
 
     void configureSyncMode() {
-        bool force = envEnabled("NJIV_VK_CONSERVATIVE_SYNC");
-        bool disable = envEnabled("NJIV_VK_DISABLE_CONSERVATIVE_SYNC");
         bool autoEnable = false;
         version (Windows) {
             // NVIDIA vendor id.
             autoEnable = (physicalVendorId == 0x10DE);
         }
-        if (force) {
-            conservativeSync = true;
-        } else if (disable) {
-            conservativeSync = false;
-        } else {
-            conservativeSync = autoEnable;
-        }
+        conservativeSync = autoEnable;
         writeln("[vulkan] device=", physicalDeviceName,
             " vendor=0x", cast(uint)physicalVendorId,
             " conservativeSync=", conservativeSync ? "on" : "off");
@@ -1327,9 +1342,10 @@ private:
         if (caps.currentExtent.width != uint.max) {
             swapchainExtent = caps.currentExtent;
         } else {
-            int dw = 0;
-            int dh = 0;
-            SDL_Vulkan_GetDrawableSize(window, &dw, &dh);
+            int dw = requestedDrawableW;
+            int dh = requestedDrawableH;
+            if (dw <= 0) dw = 1;
+            if (dh <= 0) dh = 1;
             swapchainExtent.width = cast(uint32_t)dw;
             swapchainExtent.height = cast(uint32_t)dh;
             if (swapchainExtent.width < caps.minImageExtent.width) swapchainExtent.width = caps.minImageExtent.width;
@@ -2935,31 +2951,37 @@ private:
     }
 }
 
-/// Initialize SDL, Vulkan loader/device, create window and renderer callbacks.
-VulkanBackendInit initVulkanBackend(int width, int height, bool isTest) {
+/// Initialize Vulkan backend with optional externally managed window/surface.
+VulkanBackendInit initVulkanBackend(int width, int height, bool isTest, VulkanInitOptions opts) {
     ensureDThreadAttached();
-    auto support = loadSDL();
-    if (support == SDLSupport.noLibrary || support == SDLSupport.badLibrary) {
-        version (OSX) {
-            support = loadSDL("/opt/homebrew/lib/libSDL2-2.0.0.dylib");
-        }
-    }
-    enforce(support >= SDLSupport.sdl206,
-        "Failed to load SDL2 or version too old for Vulkan (loaded=" ~ loadedSDLVersion().to!string ~ ")");
-    enforce(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) == 0, "SDL_Init failed: " ~ sdlError());
+    auto window = opts.windowHandle;
+    bool ownsWindow = opts.ownsWindow;
+    bool ownsSDL = opts.ownsSDL;
 
-    auto window = SDL_CreateWindow("nijiv",
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        width, height,
-        SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_SHOWN);
-    enforce(window !is null, "SDL_CreateWindow failed: " ~ sdlError());
+    enforce(!(opts.surface != VK_NULL_HANDLE && opts.surfaceFactory !is null),
+        "Specify either external surface handle or surface factory, not both");
+    enforce(opts.surface != VK_NULL_HANDLE || opts.surfaceFactory !is null,
+        "Vulkan backend requires host-provided surface");
+    enforce(opts.instanceExtensions.length > 0,
+        "Vulkan backend requires host-provided instanceExtensions");
 
-    int drawableW = width;
-    int drawableH = height;
-    SDL_Vulkan_GetDrawableSize(window, &drawableW, &drawableH);
+    int drawableW = opts.drawableW > 0 ? opts.drawableW : width;
+    int drawableH = opts.drawableH > 0 ? opts.drawableH : height;
+    if (drawableW <= 0) drawableW = 1;
+    if (drawableH <= 0) drawableH = 1;
 
-    auto backend = new RenderingBackend(window, isTest);
+    auto backend = new RenderingBackend(
+        window,
+        isTest,
+        opts.surface,
+        opts.ownsSurface,
+        opts.surfaceFactory,
+        opts.surfaceFactoryUserData,
+        opts.instanceExtensions,
+        drawableW,
+        drawableH);
     backend.initializeRenderer();
+    backend.setViewport(drawableW, drawableH);
 
     UnityResourceCallbacks cbs;
     cbs.userData = window;
@@ -3038,7 +3060,13 @@ VulkanBackendInit initVulkanBackend(int width, int height, bool isTest) {
         }
     };
 
-    return VulkanBackendInit(window, backend, drawableW, drawableH, cbs);
+    return VulkanBackendInit(window, backend, drawableW, drawableH, ownsWindow, ownsSDL, opts.ownsSurface, cbs);
+}
+
+/// Backward-compatible SDL-managed initializer.
+VulkanBackendInit initVulkanBackend(int width, int height, bool isTest) {
+    enforce(false, "Use initVulkanBackend(..., VulkanInitOptions) with host-managed surface");
+    return VulkanBackendInit(null, null, width, height, false, false, false, UnityResourceCallbacks.init);
 }
 
 /// Execute command queue on Vulkan backend.
