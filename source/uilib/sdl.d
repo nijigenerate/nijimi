@@ -4,6 +4,11 @@ import bindbc.sdl;
 import std.conv : to;
 import std.string : fromStringz;
 import std.string : toStringz;
+version (OSX) {
+    import uilib.osx : setWindowMousePassthroughOSX = setWindowMousePassthrough;
+} else version (linux) {
+    import uilib.linux : setWindowMousePassthroughLinux = setWindowMousePassthrough;
+}
 
 private __gshared SDL_Tray* gTray = null;
 private __gshared SDL_TrayEntry* gToggleEntry = null;
@@ -37,6 +42,19 @@ void configureWindowInputPolicy(SDL_Window* window, bool focusable, void functio
     SDL_SetWindowFocusable(window, focusable);
     if (debugFn !is null) {
         debugFn("[overlay] input policy: focusable=" ~ (focusable ? "true" : "false"));
+    }
+}
+
+void setWindowMousePassthrough(SDL_Window* window, bool enabled, void function(string) debugFn = null) {
+    if (window is null) return;
+    version (OSX) {
+        setWindowMousePassthroughOSX(window, enabled, debugFn);
+    } else version (linux) {
+        setWindowMousePassthroughLinux(window, enabled, debugFn);
+    } else {
+        if (debugFn !is null) {
+            debugFn("[input-pass] unsupported platform");
+        }
     }
 }
 

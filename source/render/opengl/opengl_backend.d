@@ -2395,6 +2395,20 @@ struct OpenGLInitOptions {
 }
 
 __gshared Texture[size_t] gTextures; // Unity handle -> nlshim Texture
+private struct CpuTextureRecord {
+    int width;
+    int height;
+    int channels;
+    ubyte[] pixels;
+}
+__gshared CpuTextureRecord[size_t] gCpuTextures; // Unity handle -> latest CPU pixels
+private __gshared bool gFinalAlphaProbePending = false;
+private __gshared int gFinalAlphaProbeX = 0;
+private __gshared int gFinalAlphaProbeY = 0;
+private __gshared int gFinalAlphaProbeWindowW = 0;
+private __gshared int gFinalAlphaProbeWindowH = 0;
+private __gshared bool gFinalAlphaSampleValid = false;
+private __gshared ubyte gFinalAlphaSample = 255;
 __gshared size_t gNextHandle = 1;
 __gshared bool gBackendInitialized;
 __gshared RenderResourceHandle[DynamicCompositeFramebufferKey] gDynamicFramebufferCache;
@@ -2479,6 +2493,58 @@ string sdlError() {
     return "SDL integration is now handled by the host application";
 }
 
+void setFinalAlphaProbe(const OpenGLBackendInit* gl, int localX, int localY, int windowW, int windowH) {
+    if (gl is null || windowW <= 0 || windowH <= 0) {
+        gFinalAlphaProbePending = false;
+        gFinalAlphaSampleValid = false;
+        return;
+    }
+    gFinalAlphaProbeX = localX;
+    gFinalAlphaProbeY = localY;
+    gFinalAlphaProbeWindowW = windowW;
+    gFinalAlphaProbeWindowH = windowH;
+    gFinalAlphaProbePending = true;
+}
+
+bool consumeFinalAlphaSample(const OpenGLBackendInit* gl, out ubyte alpha) {
+    alpha = 255;
+    if (gl is null || !gFinalAlphaSampleValid) return false;
+    alpha = gFinalAlphaSample;
+    gFinalAlphaSampleValid = false;
+    return true;
+}
+
+bool sampleTextureAlpha(size_t handle, float u, float v, out ubyte alpha) {
+    alpha = 0;
+    if (handle == 0) return false;
+    auto rec = handle in gCpuTextures;
+    if (rec is null) return false;
+    if (rec.width <= 0 || rec.height <= 0 || rec.channels <= 0) return false;
+    auto pixelCount = cast(size_t)rec.width * cast(size_t)rec.height;
+    auto expected = pixelCount * cast(size_t)rec.channels;
+    if (rec.pixels.length < expected) return false;
+
+    float uu = u;
+    float vv = v;
+    if (uu < 0) uu = 0;
+    if (uu > 1) uu = 1;
+    if (vv < 0) vv = 0;
+    if (vv > 1) vv = 1;
+    auto xi = cast(size_t)(uu * cast(float)(rec.width - 1));
+    auto yi = cast(size_t)(vv * cast(float)(rec.height - 1));
+    auto idx = (yi * cast(size_t)rec.width + xi) * cast(size_t)rec.channels;
+    if (idx >= rec.pixels.length) return false;
+
+    if (rec.channels >= 4 && idx + 3 < rec.pixels.length) {
+        alpha = rec.pixels[idx + 3];
+    } else if (rec.channels == 2 && idx + 1 < rec.pixels.length) {
+        alpha = rec.pixels[idx + 1];
+    } else {
+        alpha = 255;
+    }
+    return true;
+}
+
 /// Initialize OpenGL backend with optional externally managed window/context.
 OpenGLBackendInit initOpenGLBackend(int width, int height, bool isTest, OpenGLInitOptions opts) {
     auto window = opts.windowHandle;
@@ -2528,6 +2594,11 @@ OpenGLBackendInit initOpenGLBackend(int width, int height, bool isTest, OpenGLIn
         // Disable mipmaps (min filter is linear-only) to ensure level 0 is displayed.
         auto tex = new Texture(w, h, channels, stencil, false);
         gTextures[handle] = tex;
+        CpuTextureRecord rec;
+        rec.width = w;
+        rec.height = h;
+        rec.channels = channels;
+        gCpuTextures[handle] = rec;
         return handle;
     };
     cbs.updateTexture = (size_t handle, const(ubyte)* data, size_t dataLen, int w, int h, int channels, void* userData) {
@@ -2549,6 +2620,12 @@ OpenGLBackendInit initOpenGLBackend(int width, int height, bool isTest, OpenGLIn
             slice[0 .. dataLen] = data[0 .. dataLen];
         }
         (*tex).setData(slice, channels);
+        CpuTextureRecord rec;
+        rec.width = w;
+        rec.height = h;
+        rec.channels = channels;
+        rec.pixels = slice.dup;
+        gCpuTextures[handle] = rec;
     };
     cbs.releaseTexture = (size_t handle, void* userData) {
         // Drop all cached dynamic-composite FBOs that reference this texture handle.
@@ -2557,6 +2634,7 @@ OpenGLBackendInit initOpenGLBackend(int width, int height, bool isTest, OpenGLIn
             if (*tex !is null) (*tex).dispose();
             gTextures.remove(handle);
         }
+        gCpuTextures.remove(handle);
     };
 
     return OpenGLBackendInit(window, glContext, drawableW, drawableH, cbs);
@@ -2654,6 +2732,25 @@ void renderCommands(const OpenGLBackendInit* gl,
     }
     backend.postProcessScene();
     backend.presentSceneToBackbuffer(gl.drawableW, gl.drawableH);
+    if (gFinalAlphaProbePending &&
+        gl.drawableW > 0 && gl.drawableH > 0 &&
+        gFinalAlphaProbeWindowW > 0 && gFinalAlphaProbeWindowH > 0) {
+        int px = cast(int)((cast(float)gFinalAlphaProbeX / cast(float)gFinalAlphaProbeWindowW) * cast(float)gl.drawableW);
+        int py = cast(int)((cast(float)gFinalAlphaProbeY / cast(float)gFinalAlphaProbeWindowH) * cast(float)gl.drawableH);
+        if (px < 0) px = 0;
+        if (py < 0) py = 0;
+        if (px >= gl.drawableW) px = gl.drawableW - 1;
+        if (py >= gl.drawableH) py = gl.drawableH - 1;
+
+        ubyte[4] rgba = [0, 0, 0, 255];
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+        glReadPixels(px, gl.drawableH - 1 - py, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, rgba.ptr);
+        gFinalAlphaSample = rgba[3];
+        gFinalAlphaSampleValid = true;
+    } else {
+        gFinalAlphaSampleValid = false;
+    }
+    gFinalAlphaProbePending = false;
     // NOTE: Disabled per request. This debug overlay rewrites final pixels,
     // which interferes with transparent-window verification.
     // GLuint[] thumbTextureIds;

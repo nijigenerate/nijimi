@@ -349,6 +349,58 @@ private void flushPendingTextureReleases() {
     }
 }
 
+bool sampleTextureAlpha(size_t handle, float u, float v, out ubyte alpha) {
+    alpha = 0;
+    if (handle == 0) return false;
+    ensureDThreadAttached();
+    synchronized (gTexturesGuard) {
+        auto texPtr = handle in gTextures;
+        if (texPtr is null || *texPtr is null) return false;
+        auto tex = *texPtr;
+        auto data = tex.data();
+        auto w = tex.width;
+        auto h = tex.height;
+        auto ch = tex.channels;
+        if (w <= 0 || h <= 0 || ch <= 0) return false;
+        auto pixelCount = cast(size_t)w * cast(size_t)h;
+        auto expected = pixelCount * cast(size_t)ch;
+        if (data.length < expected) return false;
+
+        float uu = u;
+        float vv = v;
+        if (uu < 0) uu = 0;
+        if (uu > 1) uu = 1;
+        if (vv < 0) vv = 0;
+        if (vv > 1) vv = 1;
+        auto xi = cast(size_t)(uu * cast(float)(w - 1));
+        auto yi = cast(size_t)(vv * cast(float)(h - 1));
+        auto idx = (yi * cast(size_t)w + xi) * cast(size_t)ch;
+        if (idx >= data.length) return false;
+
+        if (ch >= 4 && idx + 3 < data.length) {
+            alpha = data[idx + 3];
+        } else if (ch == 2 && idx + 1 < data.length) {
+            alpha = data[idx + 1];
+        } else {
+            alpha = 255;
+        }
+        return true;
+    }
+}
+
+void setFinalAlphaProbe(const VulkanBackendInit* vk, int localX, int localY, int windowW, int windowH) {
+    if (vk is null || vk.backend is null) return;
+    auto backend = cast(RenderingBackend)vk.backend;
+    backend.setFinalAlphaProbe(localX, localY, windowW, windowH);
+}
+
+bool consumeFinalAlphaSample(const VulkanBackendInit* vk, out ubyte alpha) {
+    alpha = 255;
+    if (vk is null || vk.backend is null) return false;
+    auto backend = cast(RenderingBackend)vk.backend;
+    return backend.consumeFinalAlphaSample(alpha);
+}
+
 private void vkEnforce(VkResult result, string message) {
     enforce(result == VK_SUCCESS, message ~ " (VkResult=" ~ result.to!string ~ ")");
 }
@@ -566,6 +618,16 @@ private:
     VkTextureResource[size_t] textureResources;
     VkTextureResource fallbackWhite;
     VkTextureResource fallbackBlack;
+    VkBuffer finalAlphaReadbackBuffer;
+    VkDeviceMemory finalAlphaReadbackMemory;
+    bool finalAlphaProbePending;
+    bool finalAlphaProbeCopyQueued;
+    int finalAlphaProbeX;
+    int finalAlphaProbeY;
+    int finalAlphaProbeWindowW;
+    int finalAlphaProbeWindowH;
+    bool finalAlphaSampleValid;
+    ubyte finalAlphaSample = 255;
     bool textureMutationSynced;
 
     const(SharedBufferSnapshot)* currentSnapshot;
@@ -607,6 +669,10 @@ public:
             destroyTextureResource(tex);
         }
         textureResources.clear();
+        if (finalAlphaReadbackBuffer != VK_NULL_HANDLE) vkDestroyBuffer(device, finalAlphaReadbackBuffer, null);
+        if (finalAlphaReadbackMemory != VK_NULL_HANDLE) vkFreeMemory(device, finalAlphaReadbackMemory, null);
+        finalAlphaReadbackBuffer = VK_NULL_HANDLE;
+        finalAlphaReadbackMemory = VK_NULL_HANDLE;
 
         if (vertexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(device, vertexBuffer, null);
         if (vertexMemory != VK_NULL_HANDLE) vkFreeMemory(device, vertexMemory, null);
@@ -650,11 +716,39 @@ public:
         createLogicalDevice();
         createCommandPool();
         createSyncObjects();
+        createBuffer(4,
+                     VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     finalAlphaReadbackBuffer,
+                     finalAlphaReadbackMemory);
         recreateSwapchain();
     }
 
     bool supportsPerPixelTransparency() const {
         return perPixelTransparencyAvailable;
+    }
+
+    void setFinalAlphaProbe(int localX, int localY, int windowW, int windowH) {
+        if (windowW <= 0 || windowH <= 0) {
+            finalAlphaProbePending = false;
+            finalAlphaProbeCopyQueued = false;
+            finalAlphaSampleValid = false;
+            return;
+        }
+        finalAlphaProbeX = localX;
+        finalAlphaProbeY = localY;
+        finalAlphaProbeWindowW = windowW;
+        finalAlphaProbeWindowH = windowH;
+        finalAlphaProbePending = true;
+        finalAlphaProbeCopyQueued = false;
+    }
+
+    bool consumeFinalAlphaSample(out ubyte alpha) {
+        alpha = 255;
+        if (!finalAlphaSampleValid) return false;
+        alpha = finalAlphaSample;
+        finalAlphaSampleValid = false;
+        return true;
     }
 
     void setViewport(int width, int height) {
@@ -2663,6 +2757,7 @@ private:
     }
 
     void recordCommandBuffer(VkCommandBuffer cmd, uint imageIndex) {
+        finalAlphaProbeCopyQueued = false;
         VkCommandBufferBeginInfo beginInfo;
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         vkEnforce(vkBeginCommandBuffer(cmd, &beginInfo), "vkBeginCommandBuffer failed");
@@ -2872,6 +2967,94 @@ private:
             }
         }
 
+        if (finalAlphaProbePending &&
+            finalAlphaReadbackBuffer != VK_NULL_HANDLE &&
+            finalAlphaReadbackMemory != VK_NULL_HANDLE &&
+            finalAlphaProbeWindowW > 0 &&
+            finalAlphaProbeWindowH > 0 &&
+            swapchainExtent.width > 0 &&
+            swapchainExtent.height > 0 &&
+            imageIndex < swapchainImages.length) {
+            int px = cast(int)((cast(float)finalAlphaProbeX / cast(float)finalAlphaProbeWindowW) * cast(float)swapchainExtent.width);
+            int py = cast(int)((cast(float)finalAlphaProbeY / cast(float)finalAlphaProbeWindowH) * cast(float)swapchainExtent.height);
+            if (px < 0) px = 0;
+            if (py < 0) py = 0;
+            if (px >= cast(int)swapchainExtent.width) px = cast(int)swapchainExtent.width - 1;
+            if (py >= cast(int)swapchainExtent.height) py = cast(int)swapchainExtent.height - 1;
+
+            VkImageMemoryBarrier toTransfer;
+            toTransfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            toTransfer.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            toTransfer.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            toTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            toTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            toTransfer.image = swapchainImages[imageIndex];
+            toTransfer.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            toTransfer.subresourceRange.baseMipLevel = 0;
+            toTransfer.subresourceRange.levelCount = 1;
+            toTransfer.subresourceRange.baseArrayLayer = 0;
+            toTransfer.subresourceRange.layerCount = 1;
+            vkCmdPipelineBarrier(cmd,
+                                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 0,
+                                 0,
+                                 null,
+                                 0,
+                                 null,
+                                 1,
+                                 &toTransfer);
+
+            VkBufferImageCopy copyRegion;
+            copyRegion.bufferOffset = 0;
+            copyRegion.bufferRowLength = 0;
+            copyRegion.bufferImageHeight = 0;
+            copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            copyRegion.imageSubresource.mipLevel = 0;
+            copyRegion.imageSubresource.baseArrayLayer = 0;
+            copyRegion.imageSubresource.layerCount = 1;
+            copyRegion.imageOffset.x = px;
+            copyRegion.imageOffset.y = py;
+            copyRegion.imageOffset.z = 0;
+            copyRegion.imageExtent.width = 1;
+            copyRegion.imageExtent.height = 1;
+            copyRegion.imageExtent.depth = 1;
+            vkCmdCopyImageToBuffer(cmd,
+                                   swapchainImages[imageIndex],
+                                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                   finalAlphaReadbackBuffer,
+                                   1,
+                                   &copyRegion);
+
+            VkImageMemoryBarrier toPresent;
+            toPresent.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            toPresent.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            toPresent.dstAccessMask = 0;
+            toPresent.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            toPresent.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            toPresent.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            toPresent.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            toPresent.image = swapchainImages[imageIndex];
+            toPresent.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            toPresent.subresourceRange.baseMipLevel = 0;
+            toPresent.subresourceRange.levelCount = 1;
+            toPresent.subresourceRange.baseArrayLayer = 0;
+            toPresent.subresourceRange.layerCount = 1;
+            vkCmdPipelineBarrier(cmd,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                 0,
+                                 0,
+                                 null,
+                                 0,
+                                 null,
+                                 1,
+                                 &toPresent);
+            finalAlphaProbeCopyQueued = true;
+        }
+
         vkEnforce(vkEndCommandBuffer(cmd), "vkEndCommandBuffer failed");
     }
 
@@ -2929,6 +3112,24 @@ private:
         auto signalSemaphore = renderFinishedByImage[imageIndex];
         submit.pSignalSemaphores = &signalSemaphore;
         vkEnforce(vkQueueSubmit(graphicsQueue, 1, &submit, inFlight[frameIndex]), "vkQueueSubmit failed");
+
+        if (finalAlphaProbeCopyQueued) {
+            vkWaitForFences(device, 1, &inFlight[frameIndex], VK_TRUE, ulong.max);
+            void* mapped = null;
+            if (vkMapMemory(device, finalAlphaReadbackMemory, 0, 4, 0, &mapped) == VK_SUCCESS && mapped !is null) {
+                auto bytes = (cast(ubyte*)mapped)[0 .. 4];
+                finalAlphaSample = bytes[3];
+                finalAlphaSampleValid = true;
+                vkUnmapMemory(device, finalAlphaReadbackMemory);
+            } else {
+                finalAlphaSampleValid = false;
+            }
+            finalAlphaProbePending = false;
+            finalAlphaProbeCopyQueued = false;
+        } else if (finalAlphaProbePending) {
+            finalAlphaSampleValid = false;
+            finalAlphaProbePending = false;
+        }
 
         VkPresentInfoKHR present;
         present.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;

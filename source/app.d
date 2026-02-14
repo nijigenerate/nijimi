@@ -24,10 +24,11 @@ version (Windows) {
 
 version (Posix) {
     import core.sys.posix.dlfcn : dlsym, dlerror;
+    import core.sys.posix.stdlib : unsetenv;
 }
 
 import bindbc.sdl;
-import uilib.sdl : configureWindowAlwaysOnTop, configureWindowBorderlessDesktop, configureWindowInputPolicy, initializeSystemTray, updateSystemTray, consumeTrayQuitRequested,
+import uilib.sdl : configureWindowAlwaysOnTop, configureWindowBorderlessDesktop, configureWindowInputPolicy, setWindowMousePassthrough, initializeSystemTray, updateSystemTray, consumeTrayQuitRequested,
     consumeTrayToggleRequested, setSystemTrayWindowVisible, shutdownSystemTray;
 import tracking : TrackingReceiver, TrackingBindingsExtKey;
 
@@ -261,6 +262,20 @@ private Vec4f mulMat4Vec4(ref const(float[16]) m, float x, float y, float z, flo
     return r;
 }
 
+private float[16] mulMat4(in float[16] a, in float[16] b) {
+    float[16] r;
+    foreach (row; 0 .. 4) {
+        foreach (col; 0 .. 4) {
+            float s = 0;
+            foreach (k; 0 .. 4) {
+                s += a[k * 4 + row] * b[col * 4 + k];
+            }
+            r[col * 4 + row] = s;
+        }
+    }
+    return r;
+}
+
 private struct PuppetScreenBounds {
     bool valid;
     float minX;
@@ -361,6 +376,11 @@ private void includePartPacketBounds(ref PuppetScreenBounds bounds,
     }
     if (windowW <= 0 || windowH <= 0) return;
     if (snapshot.vertices.data is null || snapshot.vertices.length == 0) return;
+    if (packet.vertexAtlasStride == 0) return;
+    auto vxBase = packet.vertexOffset;
+    auto vyBase = packet.vertexOffset + packet.vertexAtlasStride;
+    if (vxBase + packet.vertexCount > snapshot.vertices.length) return;
+    if (vyBase + packet.vertexCount > snapshot.vertices.length) return;
 
     if (!dragMapSet) {
         dragMap.valid = true;
@@ -373,26 +393,29 @@ private void includePartPacketBounds(ref PuppetScreenBounds bounds,
         dragMapSet = true;
     }
 
+    auto mvp = mulMat4(packet.renderMatrix, packet.modelMatrix);
     foreach (i; 0 .. packet.indexCount) {
         auto vi = cast(size_t)packet.indices[i];
         if (vi >= packet.vertexCount) continue;
 
-        auto vxBase = packet.vertexOffset + vi * packet.vertexAtlasStride;
-        if (vxBase + 1 >= snapshot.vertices.length) continue;
-        float vx = snapshot.vertices.data[vxBase];
-        float vy = snapshot.vertices.data[vxBase + 1];
+        float vx = snapshot.vertices.data[vxBase + vi];
+        float vy = snapshot.vertices.data[vyBase + vi];
 
         float dx = 0;
         float dy = 0;
-        auto dBase = packet.deformOffset + vi * packet.deformAtlasStride;
-        if (snapshot.deform.data !is null && dBase + 1 < snapshot.deform.length) {
-            dx = snapshot.deform.data[dBase];
-            dy = snapshot.deform.data[dBase + 1];
+        if (snapshot.deform.data !is null && packet.deformAtlasStride != 0) {
+            auto dxBase = packet.deformOffset;
+            auto dyBase = packet.deformOffset + packet.deformAtlasStride;
+            if (dxBase + packet.vertexCount <= snapshot.deform.length &&
+                dyBase + packet.vertexCount <= snapshot.deform.length) {
+                dx = snapshot.deform.data[dxBase + vi];
+                dy = snapshot.deform.data[dyBase + vi];
+            }
         }
 
         float px = vx - packet.origin.x + dx;
         float py = vy - packet.origin.y + dy;
-        auto clip = mulMat4Vec4(packet.renderMatrix, px, py, 0, 1);
+        auto clip = mulMat4Vec4(mvp, px, py, 0, 1);
         if (clip.w == 0 || isNaN(clip.w)) continue;
         float invW = 1.0f / clip.w;
         float ndcX = clip.x * invW;
@@ -542,9 +565,26 @@ void main(string[] args) {
 
     import bindbc.loader : LoadMsg;
     auto sdlSupport = loadSDL();
-    if (sdlSupport == LoadMsg.noLibrary || sdlSupport == LoadMsg.badLibrary) {
-        version (OSX) {
-            sdlSupport = loadSDL("/opt/homebrew/lib/libSDL3.0.dylib");
+    version (OSX) {
+        if (sdlSupport == LoadMsg.noLibrary || sdlSupport == LoadMsg.badLibrary) {
+            immutable string[] sdl3Candidates = [
+                "/opt/homebrew/lib/libSDL3.dylib",
+                "/opt/homebrew/lib/libSDL3.0.dylib",
+                "/opt/homebrew/opt/sdl3/lib/libSDL3.dylib",
+                "/opt/homebrew/opt/sdl3/lib/libSDL3.0.dylib",
+                "/usr/local/lib/libSDL3.dylib",
+                "/usr/local/lib/libSDL3.0.dylib",
+                "/usr/local/opt/sdl3/lib/libSDL3.dylib",
+                "/usr/local/opt/sdl3/lib/libSDL3.0.dylib",
+                "/Library/Frameworks/SDL3.framework/SDL3",
+                "/System/Library/Frameworks/SDL3.framework/SDL3",
+            ];
+
+            foreach (candidate; sdl3Candidates) {
+                if (!exists(candidate)) continue;
+                sdlSupport = loadSDL(candidate.toStringz);
+                if (sdlSupport == LoadMsg.success) break;
+            }
         }
     }
     enforce(sdlSupport == LoadMsg.success, "Failed to load SDL3");
@@ -576,11 +616,53 @@ void main(string[] args) {
 
     version (EnableVulkanBackend) {
         import erupted : VkInstance, VkSurfaceKHR;
+        version (OSX) {
+            // Shell environments (conda, custom Vulkan SDK settings) can inject
+            // layer paths that cause process crashes before useful diagnostics.
+            // Keep runtime stable by ignoring explicit layer overrides here.
+            unsetenv("VK_LAYER_PATH".ptr);
+            unsetenv("VK_INSTANCE_LAYERS".ptr);
+        }
+
+        bool vulkanLibraryLoaded = SDL_Vulkan_LoadLibrary(null);
+        if (!vulkanLibraryLoaded) {
+            version (OSX) {
+                import core.stdc.stdlib : getenv;
+                string[] vulkanLibCandidates = [
+                    "/opt/homebrew/lib/libvulkan.1.dylib",
+                    "/opt/homebrew/lib/libMoltenVK.dylib",
+                    "/usr/local/lib/libvulkan.1.dylib",
+                    "/usr/local/lib/libMoltenVK.dylib",
+                ];
+                auto sdk = getenv("VULKAN_SDK");
+                if (sdk !is null) {
+                    auto sdkPath = fromStringz(sdk).idup;
+                    vulkanLibCandidates ~= buildPath(sdkPath, "macOS", "lib", "libvulkan.1.dylib");
+                    vulkanLibCandidates ~= buildPath(sdkPath, "lib", "libvulkan.1.dylib");
+                    vulkanLibCandidates ~= buildPath(sdkPath, "lib", "libMoltenVK.dylib");
+                }
+                foreach (candidate; vulkanLibCandidates) {
+                    if (!exists(candidate)) continue;
+                    if (SDL_Vulkan_LoadLibrary(candidate.toStringz)) {
+                        vulkanLibraryLoaded = true;
+                        writeln("[vulkan] SDL_Vulkan_LoadLibrary loaded: ", candidate);
+                        break;
+                    }
+                }
+            }
+        }
+        if (!vulkanLibraryLoaded) {
+            auto err = SDL_GetError();
+            writeln("[vulkan] warning: SDL_Vulkan_LoadLibrary failed: ", err is null ? "" : fromStringz(err).idup);
+        }
 
         hostWindow = SDL_CreateWindow("nijimi",
             width, height,
             SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
-        enforce(hostWindow !is null, "SDL_CreateWindow failed (vulkan)");
+        enforce(hostWindow !is null,
+            "SDL_CreateWindow failed (vulkan): " ~
+            (SDL_GetError() is null ? "" : fromStringz(SDL_GetError()).idup) ~
+            " ; ensure Vulkan loader/MoltenVK is installed (e.g. /opt/homebrew/lib/libvulkan.1.dylib)");
         configureWindowBorderlessDesktop(hostWindow, &transparentDebug);
         configureWindowAlwaysOnTop(hostWindow, true);
         configureWindowInputPolicy(hostWindow, false, &transparentDebug);
@@ -693,6 +775,17 @@ void main(string[] args) {
     bool trayWindowVisible = true;
     setSystemTrayWindowVisible(trayWindowVisible);
     bool transparencyRetryPending = canApplyTransparentWindow && transparentWindowRetry;
+    bool supportsDynamicMousePassthrough = false;
+    version (OSX) {
+        supportsDynamicMousePassthrough = true;
+    } else version (linux) {
+        supportsDynamicMousePassthrough = true;
+    }
+    bool mousePassthroughActive = false;
+    if (supportsDynamicMousePassthrough) {
+        setWindowMousePassthrough(hostWindow, false, &transparentDebug);
+        configureWindowInputPolicy(hostWindow, true, &transparentDebug);
+    }
 
     // Load the Unity-facing DLL from a nearby nijilive build.
     string exeDir = getcwd();
@@ -1021,6 +1114,32 @@ void main(string[] args) {
         enforce(api.emitCommands(renderer, &view) == gfx.NjgResult.Ok, "njgEmitCommands failed");
         gfx.SharedBufferSnapshot snapshot;
         enforce(api.getSharedBuffers(renderer, &snapshot) == gfx.NjgResult.Ok, "njgGetSharedBuffers failed");
+        bool cursorInsideWindow = false;
+        int cursorLocalX = 0;
+        int cursorLocalY = 0;
+        int cursorWindowW = 0;
+        int cursorWindowH = 0;
+        if (supportsDynamicMousePassthrough && canApplyTransparentWindow) {
+            float mouseGlobalX = 0;
+            float mouseGlobalY = 0;
+            SDL_GetGlobalMouseState(&mouseGlobalX, &mouseGlobalY);
+            int windowX = 0;
+            int windowY = 0;
+            SDL_GetWindowPosition(hostWindow, &windowX, &windowY);
+            SDL_GetWindowSize(hostWindow, &cursorWindowW, &cursorWindowH);
+            if (cursorWindowW > 0 && cursorWindowH > 0) {
+                auto localX = mouseGlobalX - cast(float)windowX;
+                auto localY = mouseGlobalY - cast(float)windowY;
+                if (localX >= 0 && localY >= 0 &&
+                    localX < cast(float)cursorWindowW &&
+                    localY < cast(float)cursorWindowH) {
+                    cursorInsideWindow = true;
+                    cursorLocalX = cast(int)localX;
+                    cursorLocalY = cast(int)localY;
+                    gfx.setFinalAlphaProbe(&backendInit, cursorLocalX, cursorLocalY, cursorWindowW, cursorWindowH);
+                }
+            }
+        }
         int windowW = 0;
         int windowH = 0;
         SDL_GetWindowSize(hostWindow, &windowW, &windowH);
@@ -1033,6 +1152,23 @@ void main(string[] args) {
         if (transparencyRetryPending) {
             configureTransparentWindow(hostWindow, &transparentDebug);
             transparencyRetryPending = false;
+        }
+
+        if (supportsDynamicMousePassthrough && canApplyTransparentWindow) {
+            bool onOpaquePixel = false;
+            if (cursorInsideWindow) {
+                ubyte alpha = 255;
+                auto sampled = gfx.consumeFinalAlphaSample(&backendInit, alpha);
+                onOpaquePixel = sampled ? (alpha >= 8) : true;
+            }
+            bool wantsPassthrough = !onOpaquePixel;
+            if (wantsPassthrough != mousePassthroughActive) {
+                setWindowMousePassthrough(hostWindow, wantsPassthrough, &transparentDebug);
+                mousePassthroughActive = wantsPassthrough;
+            }
+        } else if (mousePassthroughActive) {
+            setWindowMousePassthrough(hostWindow, false, &transparentDebug);
+            mousePassthroughActive = false;
         }
 
         api.flushCommands(renderer);
@@ -1052,6 +1188,11 @@ void main(string[] args) {
             writefln("Exit: elapsed %s > test-timeout %s", elapsed.total!"seconds", testTimeout.total!"seconds");
             break;
         }
+    }
+
+    if (mousePassthroughActive) {
+        setWindowMousePassthrough(hostWindow, false, &transparentDebug);
+        mousePassthroughActive = false;
     }
 
     trackingReceiver.stop();

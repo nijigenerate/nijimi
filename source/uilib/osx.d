@@ -162,4 +162,38 @@ version (OSX) {
 
         debugLog(debugFn, "[transparent] macOS: applied non-opaque settings views=" ~ touchedViews.to!string ~ " layers=" ~ touchedLayers.to!string);
     }
+
+    void setWindowMousePassthrough(SDL_Window* window, bool enabled, void function(string) debugFn = null) {
+        if (window is null) return;
+
+        auto objcHandle = dlopen("/usr/lib/libobjc.A.dylib".toStringz, RTLD_NOW | RTLD_LOCAL);
+        if (objcHandle is null) {
+            debugLog(debugFn, "[input-pass] macOS: failed to open /usr/lib/libobjc.A.dylib");
+            return;
+        }
+
+        auto selRegisterName = cast(ObjcRegisterSelFn)dlsym(objcHandle, "sel_registerName".toStringz);
+        auto objcMsgSendRaw = dlsym(objcHandle, "objc_msgSend".toStringz);
+        if (selRegisterName is null || objcMsgSendRaw is null) {
+            debugLog(debugFn, "[input-pass] macOS: objc runtime symbols not found");
+            return;
+        }
+
+        auto msgSendBool = cast(MsgSendBoolFn)objcMsgSendRaw;
+        auto props = SDL_GetWindowProperties(window);
+        auto nsWindow = cast(ObjcId)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, null);
+        if (nsWindow is null) {
+            debugLog(debugFn, "[input-pass] macOS: nsWindow is null");
+            return;
+        }
+
+        auto selSetIgnoresMouseEvents = selRegisterName("setIgnoresMouseEvents:".toStringz);
+        if (selSetIgnoresMouseEvents is null) {
+            debugLog(debugFn, "[input-pass] macOS: selector lookup failed");
+            return;
+        }
+
+        msgSendBool(nsWindow, selSetIgnoresMouseEvents, enabled ? cast(ObjcBool)1 : cast(ObjcBool)0);
+        debugLog(debugFn, "[input-pass] macOS: ignoresMouseEvents=" ~ (enabled ? "true" : "false"));
+    }
 }
