@@ -16,6 +16,7 @@ import core.stdc.string : memcpy;
 import core.stdc.stdint : uint32_t;
 import core.stdc.stdio : fprintf, stderr;
 
+public import render.common.dll_interface;
 
 import erupted;
 import erupted.vulkan_lib_loader;
@@ -68,131 +69,6 @@ enum BlendMode : int {
     ClipToLower,
     SliceFromLower,
     Count,
-}
-
-enum NjgResult : int {
-    Ok = 0,
-    InvalidArgument = 1,
-    Failure = 2,
-}
-
-alias RendererHandle = void*;
-alias PuppetHandle = void*;
-
-enum NjgRenderCommandKind : uint {
-    DrawPart,
-    DrawMask,
-    BeginDynamicComposite,
-    EndDynamicComposite,
-    BeginMask,
-    ApplyMask,
-    BeginMaskContent,
-    EndMask,
-}
-
-extern(C) struct UnityRendererConfig {
-    int viewportWidth;
-    int viewportHeight;
-}
-
-extern(C) struct FrameConfig {
-    int viewportWidth;
-    int viewportHeight;
-}
-
-extern(C) struct NjgPartDrawPacket {
-    bool isMask;
-    bool renderable;
-    float[16] modelMatrix;
-    float[16] renderMatrix;
-    float renderRotation;
-    Vec3f clampedTint;
-    Vec3f clampedScreen;
-    float opacity;
-    float emissionStrength;
-    float maskThreshold;
-    int blendingMode;
-    bool useMultistageBlend;
-    bool hasEmissionOrBumpmap;
-    size_t[3] textureHandles;
-    size_t textureCount;
-    Vec2f origin;
-    size_t vertexOffset;
-    size_t vertexAtlasStride;
-    size_t uvOffset;
-    size_t uvAtlasStride;
-    size_t deformOffset;
-    size_t deformAtlasStride;
-    const(ushort)* indices;
-    size_t indexCount;
-    size_t vertexCount;
-}
-
-extern(C) struct NjgMaskDrawPacket {
-    float[16] modelMatrix;
-    float[16] mvp;
-    Vec2f origin;
-    size_t vertexOffset;
-    size_t vertexAtlasStride;
-    size_t deformOffset;
-    size_t deformAtlasStride;
-    const(ushort)* indices;
-    size_t indexCount;
-    size_t vertexCount;
-}
-
-extern(C) struct NjgMaskApplyPacket {
-    MaskDrawableKind kind;
-    bool isDodge;
-    NjgPartDrawPacket partPacket;
-    NjgMaskDrawPacket maskPacket;
-}
-
-extern(C) struct NjgDynamicCompositePass {
-    size_t[3] textures;
-    size_t textureCount;
-    size_t stencil;
-    Vec2f scale;
-    float rotationZ;
-    bool autoScaled;
-    RenderResourceHandle origBuffer;
-    int[4] origViewport;
-    int drawBufferCount;
-    bool hasStencil;
-}
-
-extern(C) struct NjgQueuedCommand {
-    NjgRenderCommandKind kind;
-    NjgPartDrawPacket partPacket;
-    NjgMaskApplyPacket maskApplyPacket;
-    NjgDynamicCompositePass dynamicPass;
-    bool usesStencil;
-}
-
-extern(C) struct CommandQueueView {
-    const(NjgQueuedCommand)* commands;
-    size_t count;
-}
-
-extern(C) struct NjgBufferSlice {
-    const(float)* data;
-    size_t length;
-}
-
-extern(C) struct SharedBufferSnapshot {
-    NjgBufferSlice vertices;
-    NjgBufferSlice uvs;
-    NjgBufferSlice deform;
-    size_t vertexCount;
-    size_t uvCount;
-    size_t deformCount;
-}
-
-extern(C) struct UnityResourceCallbacks {
-    void* userData;
-    size_t function(int width, int height, int channels, int mipLevels, int format, bool renderTarget, bool stencil, void* userData) createTexture;
-    void function(size_t handle, const(ubyte)* data, size_t dataLen, int width, int height, int channels, void* userData) updateTexture;
-    void function(size_t handle, void* userData) releaseTexture;
 }
 
 struct VulkanBackendInit {
@@ -864,7 +740,7 @@ public:
     void applyMask(ref const(NjgMaskApplyPacket) packet) {
         if (!maskBuildActive || !maskStencilAvailable) return;
         pendingMaskWriteReference = packet.isDodge ? 0u : 1u;
-        if (packet.kind == MaskDrawableKind.Part) {
+        if (packet.kind == NjgMaskDrawableKind.Part) {
             drawPartPacket(packet.partPacket);
         } else {
             drawMaskPacket(packet.maskPacket);
@@ -964,8 +840,8 @@ public:
         int baseVertex = cast(int)cpuVertices.length;
         cpuVertices.reserve(cpuVertices.length + packet.vertexCount);
         foreach (i; 0 .. packet.vertexCount) {
-            auto px = vertices.data[vxBase + i] + deform.data[dxBase + i] - packet.origin.x;
-            auto py = vertices.data[vyBase + i] + deform.data[dyBase + i] - packet.origin.y;
+            auto px = vertices.data[vxBase + i] + deform.data[dxBase + i] - packet.origin[0];
+            auto py = vertices.data[vyBase + i] + deform.data[dyBase + i] - packet.origin[1];
 
             auto clip = mulMat4Vec4(mvp, px, py, 0, 1);
             float invW = (clip.a == 0 || isNaN(clip.a)) ? 1.0f : 1.0f / clip.a;
@@ -990,8 +866,8 @@ public:
             base.firstIndex = firstIndex;
             base.indexCount = cast(uint)(cpuIndices.length - firstIndex);
             base.vertexOffset = baseVertex;
-            base.pushConstants.tintOpacity = [packet.clampedTint.x, packet.clampedTint.y, packet.clampedTint.z, packet.opacity];
-            base.pushConstants.screenEmission = [packet.clampedScreen.x, packet.clampedScreen.y, packet.clampedScreen.z, packet.emissionStrength];
+            base.pushConstants.tintOpacity = [packet.clampedTint[0], packet.clampedTint[1], packet.clampedTint[2], packet.opacity];
+            base.pushConstants.screenEmission = [packet.clampedScreen[0], packet.clampedScreen[1], packet.clampedScreen[2], packet.emissionStrength];
             base.textureCount = min(packet.textureCount, packet.textureHandles.length);
             foreach (i; 0 .. base.textureCount) {
                 base.textureHandles[i] = packet.textureHandles[i];
@@ -1069,8 +945,8 @@ public:
         auto mvp = packet.mvp;
         int baseVertex = cast(int)cpuVertices.length;
         foreach (i; 0 .. packet.vertexCount) {
-            auto px = vertices.data[vxBase + i] + deform.data[dxBase + i] - packet.origin.x;
-            auto py = vertices.data[vyBase + i] + deform.data[dyBase + i] - packet.origin.y;
+            auto px = vertices.data[vxBase + i] + deform.data[dxBase + i] - packet.origin[0];
+            auto py = vertices.data[vyBase + i] + deform.data[dyBase + i] - packet.origin[1];
             auto clip = mulMat4Vec4(mvp, px, py, 0, 1);
             float invW = (clip.a == 0 || isNaN(clip.a)) ? 1.0f : 1.0f / clip.a;
             Vertex v;
@@ -3287,8 +3163,6 @@ void renderCommands(const VulkanBackendInit* vk,
         final switch (cmd.kind) {
             case NjgRenderCommandKind.DrawPart:
                 backend.drawPartPacket(cmd.partPacket);
-                break;
-            case NjgRenderCommandKind.DrawMask:
                 break;
             case NjgRenderCommandKind.BeginDynamicComposite:
                 backend.beginDynamicComposite(cmd.dynamicPass);

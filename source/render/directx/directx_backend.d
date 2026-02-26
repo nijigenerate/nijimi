@@ -12,6 +12,7 @@ import core.stdc.string : memcpy;
 import core.sys.windows.com : CoInitializeEx, COINIT_MULTITHREADED;
 import core.sys.windows.windows : HANDLE, HWND, RECT, CloseHandle, CreateEventW, WaitForSingleObject, INFINITE, GetClientRect;
 import core.sys.windows.windef : HRESULT;
+public import render.common.dll_interface;
 
 import aurora.directx.d3d12 : D3D12_HEAP_TYPE;
 import aurora.directx.com : DXPtr, uuidof;
@@ -64,12 +65,6 @@ void setDirectXRuntimeOptions(DirectXRuntimeOptions opts) {
 enum MaskDrawableKind : uint {
     Part,
     Mask,
-}
-
-enum NjgResult : int {
-    Ok = 0,
-    InvalidArgument = 1,
-    Failure = 2,
 }
 
 enum BlendMode : int {
@@ -182,126 +177,6 @@ HRESULT WinD3D12SerializeRootSignature(
     D3D_ROOT_SIGNATURE_VERSION sigVersion,
     ID3DBlob* ppBlob,
     ID3DBlob* ppErrorBlob);
-
-alias RendererHandle = void*;
-alias PuppetHandle = void*;
-
-// Keep in sync with nijilive/source/nijilive/integration/unity.d
-enum NjgRenderCommandKind : uint {
-    DrawPart,
-    DrawMask,
-    BeginDynamicComposite,
-    EndDynamicComposite,
-    BeginMask,
-    ApplyMask,
-    BeginMaskContent,
-    EndMask,
-}
-
-extern(C) struct UnityRendererConfig {
-    int viewportWidth;
-    int viewportHeight;
-}
-
-extern(C) struct FrameConfig {
-    int viewportWidth;
-    int viewportHeight;
-}
-
-extern(C) struct NjgPartDrawPacket {
-    bool isMask;
-    bool renderable;
-    float[16] modelMatrix;
-    float[16] renderMatrix;
-    float renderRotation;
-    Vec3f clampedTint;
-    Vec3f clampedScreen;
-    float opacity;
-    float emissionStrength;
-    float maskThreshold;
-    int blendingMode;
-    bool useMultistageBlend;
-    bool hasEmissionOrBumpmap;
-    size_t[3] textureHandles;
-    size_t textureCount;
-    Vec2f origin;
-    size_t vertexOffset;
-    size_t vertexAtlasStride;
-    size_t uvOffset;
-    size_t uvAtlasStride;
-    size_t deformOffset;
-    size_t deformAtlasStride;
-    const(ushort)* indices;
-    size_t indexCount;
-    size_t vertexCount;
-}
-
-extern(C) struct NjgMaskDrawPacket {
-    float[16] modelMatrix;
-    float[16] mvp;
-    Vec2f origin;
-    size_t vertexOffset;
-    size_t vertexAtlasStride;
-    size_t deformOffset;
-    size_t deformAtlasStride;
-    const(ushort)* indices;
-    size_t indexCount;
-    size_t vertexCount;
-}
-
-extern(C) struct NjgMaskApplyPacket {
-    MaskDrawableKind kind;
-    bool isDodge;
-    NjgPartDrawPacket partPacket;
-    NjgMaskDrawPacket maskPacket;
-}
-
-extern(C) struct NjgDynamicCompositePass {
-    size_t[3] textures;
-    size_t textureCount;
-    size_t stencil;
-    Vec2f scale;
-    float rotationZ;
-    bool autoScaled;
-    RenderResourceHandle origBuffer;
-    int[4] origViewport;
-    int drawBufferCount;
-    bool hasStencil;
-}
-
-extern(C) struct NjgQueuedCommand {
-    NjgRenderCommandKind kind;
-    NjgPartDrawPacket partPacket;
-    NjgMaskApplyPacket maskApplyPacket;
-    NjgDynamicCompositePass dynamicPass;
-    bool usesStencil;
-}
-
-extern(C) struct CommandQueueView {
-    const(NjgQueuedCommand)* commands;
-    size_t count;
-}
-
-extern(C) struct NjgBufferSlice {
-    const(float)* data;
-    size_t length;
-}
-
-extern(C) struct SharedBufferSnapshot {
-    NjgBufferSlice vertices;
-    NjgBufferSlice uvs;
-    NjgBufferSlice deform;
-    size_t vertexCount;
-    size_t uvCount;
-    size_t deformCount;
-}
-
-extern(C) struct UnityResourceCallbacks {
-    void* userData;
-    size_t function(int width, int height, int channels, int mipLevels, int format, bool renderTarget, bool stencil, void* userData) createTexture;
-    void function(size_t handle, const(ubyte)* data, size_t dataLen, int width, int height, int channels, void* userData) updateTexture;
-    void function(size_t handle, void* userData) releaseTexture;
-}
 
 class Texture {
 public:
@@ -2725,8 +2600,8 @@ public:
         if (packet.vertexCount - 1 > cast(size_t)(ushort.max - baseVertex)) return;
         cpuVertices.reserve(cpuVertices.length + packet.vertexCount);
         foreach (i; 0 .. packet.vertexCount) {
-            auto px = vertices.data[vxBase + i] + deform.data[dxBase + i] - packet.origin.x;
-            auto py = vertices.data[vyBase + i] + deform.data[dyBase + i] - packet.origin.y;
+            auto px = vertices.data[vxBase + i] + deform.data[dxBase + i] - packet.origin[0];
+            auto py = vertices.data[vyBase + i] + deform.data[dyBase + i] - packet.origin[1];
             auto clip = mulMat4Vec4(mvp, px, py, 0, 1);
             float invW = (clip.a == 0 || isNaN(clip.a)) ? 1.0f : 1.0f / clip.a;
 
@@ -2775,8 +2650,8 @@ public:
             span.hasEmissionOrBumpmap = packet.hasEmissionOrBumpmap;
             span.isMask = packet.isMask;
             span.maskThreshold = packet.maskThreshold;
-            span.clampedTint = packet.clampedTint;
-            span.clampedScreen = packet.clampedScreen;
+            span.clampedTint = Vec3f(packet.clampedTint[0], packet.clampedTint[1], packet.clampedTint[2]);
+            span.clampedScreen = Vec3f(packet.clampedScreen[0], packet.clampedScreen[1], packet.clampedScreen[2]);
             span.opacity = packet.opacity;
             span.emissionStrength = packet.emissionStrength;
             foreach (i; 0 .. span.textureCount) {
@@ -2837,8 +2712,8 @@ public:
         if (packet.vertexCount - 1 > cast(size_t)(ushort.max - baseVertex)) return;
         cpuVertices.reserve(cpuVertices.length + packet.vertexCount);
         foreach (i; 0 .. packet.vertexCount) {
-            auto px = vertices.data[vxBase + i] + deform.data[dxBase + i] - packet.origin.x;
-            auto py = vertices.data[vyBase + i] + deform.data[dyBase + i] - packet.origin.y;
+            auto px = vertices.data[vxBase + i] + deform.data[dxBase + i] - packet.origin[0];
+            auto py = vertices.data[vyBase + i] + deform.data[dyBase + i] - packet.origin[1];
             auto clip = mulMat4Vec4(mvp, px, py, 0, 1);
             float invW = (clip.a == 0 || isNaN(clip.a)) ? 1.0f : 1.0f / clip.a;
 
@@ -2978,11 +2853,11 @@ public:
         forceStencilRef = packet.isDodge ? cast(ubyte)0 : cast(ubyte)1;
         maskContentStencilRef = forceStencilRef;
         final switch (packet.kind) {
-            case MaskDrawableKind.Part:
+            case NjgMaskDrawableKind.Part:
                 NjgPartDrawPacket masked = packet.partPacket;
                 drawPartPacket(masked, texturesByHandle);
                 break;
-            case MaskDrawableKind.Mask:
+            case NjgMaskDrawableKind.Mask:
                 drawMaskPacket(packet.maskPacket);
                 break;
         }
@@ -3147,9 +3022,6 @@ void renderCommands(const DirectXBackendInit* dx,
         switch (kind) {
             case cast(uint)NjgRenderCommandKind.DrawPart:
                 backend.drawPartPacket(cmd.partPacket, gTextures);
-                break;
-            case cast(uint)NjgRenderCommandKind.DrawMask:
-                backend.drawMaskPacket(cmd.maskApplyPacket.maskPacket);
                 break;
             case cast(uint)NjgRenderCommandKind.BeginDynamicComposite:
                 backend.beginDynamicComposite(cmd.dynamicPass);

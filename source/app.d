@@ -413,8 +413,8 @@ private void includePartPacketBounds(ref PuppetScreenBounds bounds,
             }
         }
 
-        float px = vx - packet.origin.x + dx;
-        float py = vy - packet.origin.y + dy;
+        float px = vx - packet.origin[0] + dx;
+        float py = vy - packet.origin[1] + dy;
         auto clip = mulMat4Vec4(mvp, px, py, 0, 1);
         if (clip.w == 0 || isNaN(clip.w)) continue;
         float invW = 1.0f / clip.w;
@@ -445,7 +445,7 @@ private void updatePuppetScreenBounds(ref PuppetScreenBounds bounds,
                 includePartPacketBounds(bounds, dragMap, dragMapSet, cmd.partPacket, snapshot, windowW, windowH);
                 break;
             case gfx.NjgRenderCommandKind.ApplyMask:
-                if (cmd.maskApplyPacket.kind == gfx.MaskDrawableKind.Part) {
+                if (cast(uint)cmd.maskApplyPacket.kind == cast(uint)gfx.MaskDrawableKind.Part) {
                     includePartPacketBounds(bounds, dragMap, dragMapSet, cmd.maskApplyPacket.partPacket, snapshot, windowW, windowH);
                 }
                 break;
@@ -617,38 +617,62 @@ void main(string[] args) {
     version (EnableVulkanBackend) {
         import erupted : VkInstance, VkSurfaceKHR;
         version (OSX) {
-            // Shell environments (conda, custom Vulkan SDK settings) can inject
-            // layer paths that cause process crashes before useful diagnostics.
-            // Keep runtime stable by ignoring explicit layer overrides here.
+            // Keep Vulkan runtime selection deterministic on macOS.
+            // Shell-level overrides can mix incompatible loader/ICD/layer stacks
+            // and crash before useful diagnostics are emitted.
+            import core.stdc.stdlib : getenv;
+            auto envVkIcd = getenv("VK_ICD_FILENAMES");
+            auto envVkLayerPath = getenv("VK_LAYER_PATH");
+            auto envVkInstanceLayers = getenv("VK_INSTANCE_LAYERS");
+            if (envVkIcd !is null) {
+                writeln("[vulkan] ignoring VK_ICD_FILENAMES from environment");
+            }
+            if (envVkLayerPath !is null) {
+                writeln("[vulkan] ignoring VK_LAYER_PATH from environment");
+            }
+            if (envVkInstanceLayers !is null) {
+                writeln("[vulkan] ignoring VK_INSTANCE_LAYERS from environment");
+            }
+            unsetenv("VK_ICD_FILENAMES".ptr);
             unsetenv("VK_LAYER_PATH".ptr);
             unsetenv("VK_INSTANCE_LAYERS".ptr);
         }
 
-        bool vulkanLibraryLoaded = SDL_Vulkan_LoadLibrary(null);
+        bool vulkanLibraryLoaded = false;
+        string[] vulkanLibCandidates = [
+            "/opt/homebrew/lib/libvulkan.1.dylib",
+            "/usr/local/lib/libvulkan.1.dylib",
+            "/opt/homebrew/lib/libMoltenVK.dylib",
+            "/usr/local/lib/libMoltenVK.dylib",
+        ];
+
+        version (OSX) {
+            // Optional fallback if user keeps a local VulkanSDK; use only after
+            // stable system paths to avoid shell-specific path precedence.
+            import core.stdc.stdlib : getenv;
+            auto sdk = getenv("VULKAN_SDK");
+            if (sdk !is null) {
+                auto sdkPath = fromStringz(sdk).idup;
+                vulkanLibCandidates ~= buildPath(sdkPath, "macOS", "lib", "libvulkan.1.dylib");
+                vulkanLibCandidates ~= buildPath(sdkPath, "lib", "libvulkan.1.dylib");
+                vulkanLibCandidates ~= buildPath(sdkPath, "lib", "libMoltenVK.dylib");
+            }
+        }
+
+        foreach (candidate; vulkanLibCandidates) {
+            if (!exists(candidate)) continue;
+            if (SDL_Vulkan_LoadLibrary(candidate.toStringz)) {
+                vulkanLibraryLoaded = true;
+                writeln("[vulkan] SDL_Vulkan_LoadLibrary loaded: ", candidate);
+                break;
+            }
+        }
+
         if (!vulkanLibraryLoaded) {
-            version (OSX) {
-                import core.stdc.stdlib : getenv;
-                string[] vulkanLibCandidates = [
-                    "/opt/homebrew/lib/libvulkan.1.dylib",
-                    "/opt/homebrew/lib/libMoltenVK.dylib",
-                    "/usr/local/lib/libvulkan.1.dylib",
-                    "/usr/local/lib/libMoltenVK.dylib",
-                ];
-                auto sdk = getenv("VULKAN_SDK");
-                if (sdk !is null) {
-                    auto sdkPath = fromStringz(sdk).idup;
-                    vulkanLibCandidates ~= buildPath(sdkPath, "macOS", "lib", "libvulkan.1.dylib");
-                    vulkanLibCandidates ~= buildPath(sdkPath, "lib", "libvulkan.1.dylib");
-                    vulkanLibCandidates ~= buildPath(sdkPath, "lib", "libMoltenVK.dylib");
-                }
-                foreach (candidate; vulkanLibCandidates) {
-                    if (!exists(candidate)) continue;
-                    if (SDL_Vulkan_LoadLibrary(candidate.toStringz)) {
-                        vulkanLibraryLoaded = true;
-                        writeln("[vulkan] SDL_Vulkan_LoadLibrary loaded: ", candidate);
-                        break;
-                    }
-                }
+            // Last-resort fallback to SDL default search.
+            vulkanLibraryLoaded = SDL_Vulkan_LoadLibrary(null);
+            if (vulkanLibraryLoaded) {
+                writeln("[vulkan] SDL_Vulkan_LoadLibrary loaded via default search");
             }
         }
         if (!vulkanLibraryLoaded) {

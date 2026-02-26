@@ -3,6 +3,7 @@ module render.opengl.opengl_backend;
 import std.exception : enforce;
 import std.string : fromStringz;
 import std.conv : to;
+public import render.common.dll_interface;
 
 import bindbc.opengl;
 import render.opengl.opengl_thumb : currentDebugTextureBackend;
@@ -585,14 +586,18 @@ import inmath.linalg : rect;
 
 class RenderingBackend {
     private struct IboKey {
+        size_t handle;
         size_t ptr;
         size_t count;
         bool opEquals(ref const IboKey other) const nothrow @safe {
+            if (handle != 0 || other.handle != 0) {
+                return handle == other.handle && count == other.count;
+            }
             return ptr == other.ptr && count == other.count;
         }
         size_t toHash() const nothrow @safe {
-            // simple pointer/count mix; sufficient for stable index buffers
-            return (ptr ^ (count + 0x9e3779b97f4a7c15UL + (ptr << 6) + (ptr >> 2)));
+            auto base = handle != 0 ? handle : ptr;
+            return (base ^ (count + 0x9e3779b97f4a7c15UL + (base << 6) + (base >> 2)));
         }
     }
 
@@ -864,9 +869,9 @@ public:
         glBindVertexArray(drawableVAO);
     }
 
-    RenderResourceHandle getOrCreateIbo(const(ushort)* indices, size_t count) {
+    RenderResourceHandle getOrCreateIbo(size_t indexHandle, const(ushort)* indices, size_t count) {
         if (indices is null || count == 0) return RenderResourceHandle.init;
-        IboKey key = IboKey(cast(size_t)indices, count);
+        IboKey key = IboKey(indexHandle, cast(size_t)indices, count);
         if (auto existing = key in iboCache) {
             return *existing;
         }
@@ -1396,10 +1401,10 @@ void main() {
         glStencilMask(0xFF);
 
         final switch (packet.kind) {
-            case MaskDrawableKind.Part:
+            case NjgMaskDrawableKind.Part:
                 drawPartPacket(packet.partPacket, texturesByHandle);
                 break;
-            case MaskDrawableKind.Mask:
+            case NjgMaskDrawableKind.Mask:
                 executeMaskPacket(packet.maskPacket);
                 break;
         }
@@ -1958,7 +1963,7 @@ private:
         glBindBuffer(GL_ARRAY_BUFFER, sharedDbo);
         glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, 0, cast(void*)deformLane1Offset);
 
-        auto ibo = getOrCreateIbo(packet.indices, packet.indexCount);
+        auto ibo = getOrCreateIbo(packet.indexHandle, packet.indices, packet.indexCount);
         drawDrawableElements(ibo, packet.indexCount);
         glDisableVertexAttribArray(0);
         glDisableVertexAttribArray(1);
@@ -2158,7 +2163,7 @@ private:
     }
 
     void renderStage(ref const(NjgPartDrawPacket) packet, bool advanced) {
-        auto ibo = getOrCreateIbo(packet.indices, packet.indexCount);
+        auto ibo = getOrCreateIbo(packet.indexHandle, packet.indices, packet.indexCount);
         auto indexCount = cast(uint)packet.indexCount;
 
         if (!ibo || indexCount == 0 || packet.vertexCount == 0) return;
@@ -2248,133 +2253,6 @@ private:
         pass.autoScaled = packet.autoScaled;
         return pass;
     }
-}
-
-// ==== Types mirrored from the Unity DLL ABI ====
-alias RendererHandle = void*;
-alias PuppetHandle = void*;
-enum NjgResult : int {
-    Ok = 0,
-    InvalidArgument = 1,
-    Failure = 2,
-}
-
-enum NjgRenderCommandKind : uint {
-    DrawPart,
-    DrawMask, // align with RenderCommandKind; queue may not emit but keeps ABI in sync
-    BeginDynamicComposite,
-    EndDynamicComposite,
-    BeginMask,
-    ApplyMask,
-    BeginMaskContent,
-    EndMask,
-    BeginComposite,
-    DrawCompositeQuad,
-    EndComposite,
-}
-extern(C) struct UnityRendererConfig {
-    int viewportWidth;
-    int viewportHeight;
-}
-
-extern(C) struct FrameConfig {
-    int viewportWidth;
-    int viewportHeight;
-}
-
-extern(C) struct NjgPartDrawPacket {
-    bool isMask;
-    bool renderable;
-    float[16] modelMatrix;
-    float[16] renderMatrix;
-    float renderRotation;
-    vec3 clampedTint;
-    vec3 clampedScreen;
-    float opacity;
-    float emissionStrength;
-    float maskThreshold;
-    int blendingMode;
-    bool useMultistageBlend;
-    bool hasEmissionOrBumpmap;
-    size_t[3] textureHandles;
-    size_t textureCount;
-    vec2 origin;
-    size_t vertexOffset;
-    size_t vertexAtlasStride;
-    size_t uvOffset;
-    size_t uvAtlasStride;
-    size_t deformOffset;
-    size_t deformAtlasStride;
-    const(ushort)* indices;
-    size_t indexCount;
-    size_t vertexCount;
-}
-
-extern(C) struct NjgMaskDrawPacket {
-    float[16] modelMatrix;
-    float[16] mvp;
-    vec2 origin;
-    size_t vertexOffset;
-    size_t vertexAtlasStride;
-    size_t deformOffset;
-    size_t deformAtlasStride;
-    const(ushort)* indices;
-    size_t indexCount;
-    size_t vertexCount;
-}
-
-extern(C) struct NjgMaskApplyPacket {
-    MaskDrawableKind kind;
-    bool isDodge;
-    NjgPartDrawPacket partPacket;
-    NjgMaskDrawPacket maskPacket;
-}
-
-extern(C) struct NjgDynamicCompositePass {
-    size_t[3] textures;
-    size_t textureCount;
-    size_t stencil;
-    vec2 scale;
-    float rotationZ;
-    bool autoScaled;
-    RenderResourceHandle origBuffer;
-    int[4] origViewport;
-    int drawBufferCount;
-    bool hasStencil;
-}
-
-extern(C) struct NjgQueuedCommand {
-    NjgRenderCommandKind kind;
-    NjgPartDrawPacket partPacket;
-    NjgMaskApplyPacket maskApplyPacket;
-    NjgDynamicCompositePass dynamicPass;
-    bool usesStencil;
-}
-
-extern(C) struct CommandQueueView {
-    const(NjgQueuedCommand)* commands;
-    size_t count;
-}
-
-extern(C) struct NjgBufferSlice {
-    const(float)* data;
-    size_t length;
-}
-
-extern(C) struct SharedBufferSnapshot {
-    NjgBufferSlice vertices;
-    NjgBufferSlice uvs;
-    NjgBufferSlice deform;
-    size_t vertexCount;
-    size_t uvCount;
-    size_t deformCount;
-}
-
-extern(C) struct UnityResourceCallbacks {
-    void* userData;
-    size_t function(int width, int height, int channels, int mipLevels, int format, bool renderTarget, bool stencil, void* userData) createTexture;
-    void function(size_t handle, const(ubyte)* data, size_t dataLen, int width, int height, int channels, void* userData) updateTexture;
-    void function(size_t handle, void* userData) releaseTexture;
 }
 
 struct OpenGLBackendInit {
@@ -2685,10 +2563,6 @@ void renderCommands(const OpenGLBackendInit* gl,
             case NjgRenderCommandKind.DrawPart: {
                 drawCount++;
                 backend.drawPartPacket(cmd.partPacket, gTextures);
-                break;
-            }
-            case NjgRenderCommandKind.DrawMask: {
-                // Not expected from current queue; keep placeholder for ABI completeness.
                 break;
             }
             case NjgRenderCommandKind.BeginMask: {
