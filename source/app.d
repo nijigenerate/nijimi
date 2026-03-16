@@ -1,12 +1,13 @@
 module app;
 
+import core.stdc.stdlib : getenv;
 import core.time : MonoTime, Duration, seconds;
 import std.conv : to;
 import std.exception : enforce;
 import std.file : exists, getcwd;
-import std.path : buildPath, dirName;
+import std.path : baseName, buildPath, dirName;
 import std.stdio : writeln, writefln, stderr;
-import std.string : fromStringz, toStringz, endsWith, toLower;
+import std.string : fromStringz, toStringz, endsWith, indexOf, toLower;
 import std.math : exp, sqrt, isNaN;
 import std.algorithm : clamp;
 
@@ -110,12 +111,12 @@ T loadSymbol(T)(void* lib, string name) {
         auto sym = cast(T)GetProcAddress(cast(HMODULE)lib, name.toStringz);
         enforce(sym !is null,
             "Failed to load symbol "~name~
-            " from libnijilive-unity: " ~ dynamicLookupError());
+            " from unity library: " ~ dynamicLookupError());
         return sym;
     } else version (Posix) {
         auto sym = cast(T)dlsym(lib, name.toStringz);
         enforce(sym !is null,
-            "Failed to load symbol "~name~" from libnijilive-unity: " ~ dynamicLookupError());
+            "Failed to load symbol "~name~" from unity library: " ~ dynamicLookupError());
         return sym;
     } else {
         static assert(false, "Unsupported platform for dynamic symbol loading");
@@ -143,7 +144,7 @@ T loadOptionalSymbol(T)(void* lib, string name) {
 UnityApi loadUnityApi(string libPath) {
     // Load via druntime to share the runtime instance with the DLL.
     auto lib = Runtime.loadLibrary(libPath);
-    enforce(lib !is null, "Failed to load libnijilive-unity via Runtime.loadLibrary: "~libPath);
+    enforce(lib !is null, "Failed to load unity library via Runtime.loadLibrary: "~libPath);
     UnityApi api;
     api.lib = lib;
     api.createRenderer = loadSymbol!FnCreateRenderer(lib, "njgCreateRenderer");
@@ -168,10 +169,21 @@ UnityApi loadUnityApi(string libPath) {
 
 extern(C) void logCallback(const(char)* msg, size_t len, void* userData) {
     if (msg is null || len == 0) return;
-    writeln("[nijilive-unity] "~msg[0 .. len].idup);
+    writeln("[unity] "~msg[0 .. len].idup);
 }
 
-string[] unityLibraryNames() {
+string[] unityLibraryNames(string flavor) {
+    if (flavor == "nicxlive") {
+        version (Windows) {
+            return ["nicxlive.dll"];
+        } else version (linux) {
+            return ["libnicxlive.so", "nicxlive.so"];
+        } else version (OSX) {
+            return ["libnicxlive.dylib", "nicxlive.dylib"];
+        } else {
+            return ["libnicxlive"];
+        }
+    }
     version (Windows) {
         return ["nijilive-unity.dll", "libnijilive-unity.dll"];
     } else version (linux) {
@@ -218,11 +230,24 @@ enum ToggleOption {
 struct CliOptions {
     bool isTest = false;
     int framesFlag = -1;
+    string unityDllFlavor;
+    string unityDllPath;
     ToggleOption transparentWindow = ToggleOption.Unspecified;
     ToggleOption transparentRetry = ToggleOption.Unspecified;
     ToggleOption transparentDebug = ToggleOption.Unspecified;
     float dragSensitivity = 1.0f;
     string[] positional;
+}
+
+private string inferUnityFlavorFromPath(string path) {
+    auto lowerName = baseName(path).toLower();
+    if (lowerName.length == 0) {
+        lowerName = path.toLower();
+    }
+    if (lowerName.indexOf("nicxlive") >= 0) {
+        return "nicxlive";
+    }
+    return "nijilive";
 }
 
 private __gshared bool gTransparentDebugLog = false;
@@ -475,6 +500,20 @@ private CliOptions parseCliOptions(string[] args) {
             }
             continue;
         }
+        if (arg == "--unity-dll") {
+            if (i + 1 < args.length) {
+                auto raw = args[i + 1];
+                auto flavor = raw.toLower();
+                if (flavor == "nijilive" || flavor == "nicxlive") {
+                    out_.unityDllFlavor = flavor;
+                } else {
+                    out_.unityDllPath = raw;
+                    out_.unityDllFlavor = inferUnityFlavorFromPath(raw);
+                }
+                ++i;
+            }
+            continue;
+        }
         if (arg == "--transparent-window") {
             out_.transparentWindow = ToggleOption.Enabled;
             continue;
@@ -522,7 +561,7 @@ void main(string[] args) {
     int testMaxFrames = 5;
     auto testTimeout = 5.seconds;
     if (positional.length < 1) {
-        writeln("Usage: nijimi <puppet.inp|puppet.inx> [width height] [--test] [--transparent-window|--no-transparent-window] [--transparent-window-retry|--no-transparent-window-retry] [--transparent-debug] [--drag-sensitivity <value>]");
+        writeln("Usage: nijimi <puppet.inp|puppet.inx> [width height] [--test] [--frames N] [--unity-dll nijilive|nicxlive|PATH] [--transparent-window|--no-transparent-window] [--transparent-window-retry|--no-transparent-window-retry] [--transparent-debug] [--drag-sensitivity <value>]");
         return;
     }
     string puppetPath = resolvePuppetPath(positional[0]);
@@ -811,24 +850,79 @@ void main(string[] args) {
         configureWindowInputPolicy(hostWindow, true, &transparentDebug);
     }
 
-    // Load the Unity-facing DLL from a nearby nijilive build.
+    // Resolve Unity-facing DLL flavor.
     string exeDir = getcwd();
-    auto libNames = unityLibraryNames();
-    string[] libCandidates;
-    foreach (name; libNames) {
-        libCandidates ~= buildPath(exeDir, name);
-        libCandidates ~= buildPath(exeDir, "..", "nijilive", name);
-        libCandidates ~= buildPath(exeDir, "..", "..", "nijilive", name);
-        libCandidates ~= buildPath("..", "nijilive", name);
-    }
-    string libPath;
-    foreach (c; libCandidates) {
-        if (exists(c)) {
-            libPath = c;
-            break;
+    string unityFlavor = cli.unityDllFlavor;
+    string explicitUnityDllPath = cli.unityDllPath;
+    if (explicitUnityDllPath.length == 0 && unityFlavor.length == 0) {
+        if (auto p = getenv("NIJIMI_UNITY_DLL")) {
+            auto envRaw = fromStringz(p).idup;
+            auto envFlavor = envRaw.toLower();
+            if (envFlavor == "nijilive" || envFlavor == "nicxlive") {
+                unityFlavor = envFlavor;
+            } else {
+                explicitUnityDllPath = envRaw;
+                unityFlavor = inferUnityFlavorFromPath(envRaw);
+            }
         }
     }
-    enforce(libPath.length > 0, "Could not find nijilive unity library (searched: "~libCandidates.to!string~")");
+    if (unityFlavor.length == 0) {
+        unityFlavor = "nijilive";
+    }
+
+    string libPath;
+    bool unityDllExplicit = explicitUnityDllPath.length != 0;
+    auto libNames = unityLibraryNames(unityFlavor);
+    string[] libCandidates;
+    if (unityDllExplicit) {
+        libPath = explicitUnityDllPath;
+        enforce(exists(libPath), "Explicit unity DLL path not found: " ~ libPath);
+    } else {
+        foreach (name; libNames) {
+            if (unityFlavor == "nicxlive") {
+                version (Windows) {
+                    libCandidates ~= buildPath(exeDir, "..", "nicxlive", "build", "RelWithDebInfo", name);
+                    libCandidates ~= buildPath(exeDir, "..", "..", "nicxlive", "build", "RelWithDebInfo", name);
+                    libCandidates ~= buildPath("..", "nicxlive", "build", "RelWithDebInfo", name);
+                    libCandidates ~= buildPath(exeDir, "..", "nicxlive", "build", "Release", name);
+                    libCandidates ~= buildPath(exeDir, "..", "..", "nicxlive", "build", "Release", name);
+                    libCandidates ~= buildPath("..", "nicxlive", "build", "Release", name);
+                    libCandidates ~= buildPath(exeDir, "..", "nicxlive", "build", name);
+                    libCandidates ~= buildPath(exeDir, "..", "..", "nicxlive", "build", name);
+                    libCandidates ~= buildPath("..", "nicxlive", "build", name);
+                    libCandidates ~= buildPath(exeDir, "..", "nicxlive", "build", "Debug", name);
+                    libCandidates ~= buildPath(exeDir, "..", "..", "nicxlive", "build", "Debug", name);
+                    libCandidates ~= buildPath("..", "nicxlive", "build", "Debug", name);
+                } else {
+                    libCandidates ~= buildPath(exeDir, "..", "nicxlive", "build", name);
+                    libCandidates ~= buildPath(exeDir, "..", "..", "nicxlive", "build", name);
+                    libCandidates ~= buildPath("..", "nicxlive", "build", name);
+                    libCandidates ~= buildPath(exeDir, "..", "nicxlive", "build", "Debug", name);
+                    libCandidates ~= buildPath(exeDir, "..", "..", "nicxlive", "build", "Debug", name);
+                    libCandidates ~= buildPath("..", "nicxlive", "build", "Debug", name);
+                    libCandidates ~= buildPath(exeDir, "..", "nicxlive", "build", "RelWithDebInfo", name);
+                    libCandidates ~= buildPath(exeDir, "..", "..", "nicxlive", "build", "RelWithDebInfo", name);
+                    libCandidates ~= buildPath("..", "nicxlive", "build", "RelWithDebInfo", name);
+                    libCandidates ~= buildPath(exeDir, "..", "nicxlive", "build", "Release", name);
+                    libCandidates ~= buildPath(exeDir, "..", "..", "nicxlive", "build", "Release", name);
+                    libCandidates ~= buildPath("..", "nicxlive", "build", "Release", name);
+                }
+            } else {
+                libCandidates ~= buildPath(exeDir, name);
+                libCandidates ~= buildPath(exeDir, "..", "nijilive", name);
+                libCandidates ~= buildPath(exeDir, "..", "..", "nijilive", name);
+                libCandidates ~= buildPath("..", "nijilive", name);
+            }
+        }
+        foreach (c; libCandidates) {
+            if (exists(c)) {
+                libPath = c;
+                break;
+            }
+        }
+    }
+    enforce(libPath.length > 0, "Could not find unity library for flavor=" ~ unityFlavor ~ " (searched: "~libCandidates.to!string~")");
+    writefln("[unity] flavor=%s path=%s%s", unityFlavor, libPath, unityDllExplicit ? " (explicit)" : "");
     auto api = loadUnityApi(libPath);
     // Do not unload the shared runtime-bound DLL during process lifetime.
     if (api.rtInit !is null) api.rtInit();
