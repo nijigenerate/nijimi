@@ -89,6 +89,32 @@ extern(C) struct PuppetParameterUpdate {
 }
 alias FnUpdateParameters = extern(C) gfx.NjgResult function(gfx.PuppetHandle, const(PuppetParameterUpdate)*, size_t);
 
+size_t seedTrackingBindingsFromParameters(TrackingReceiver receiver, const(NjgParameterInfo)[] parameterInfos) {
+    if (receiver is null || parameterInfos.length == 0) return 0;
+
+    size_t seeded = 0;
+    auto bindings = receiver.bindings;
+    foreach (binding; bindings) {
+        if (binding is null) continue;
+        foreach (ref info; parameterInfos) {
+            if (binding.param.uuid != info.uuid) continue;
+
+            binding.param.isVec2 = info.isVec2;
+            binding.param.minX = info.min[0];
+            binding.param.minY = info.min[1];
+            binding.param.maxX = info.max[0];
+            binding.param.maxY = info.max[1];
+            binding.param.defaultX = info.defaults[0];
+            binding.param.defaultY = info.defaults[1];
+            binding.param.valueX = info.value[0];
+            binding.param.valueY = info.value[1];
+            ++seeded;
+            break;
+        }
+    }
+    return seeded;
+}
+
 struct UnityApi {
     void* lib;
     FnCreateRenderer createRenderer;
@@ -947,7 +973,12 @@ void main(string[] args) {
                 foreach (info; parameterInfos[0 .. actual]) {
                     trackedParameterValues[info.uuid] = info.value;
                 }
-                writefln("[tracking] initialized %s parameter values from njgQuery.", actual);
+                auto seededBindings = seedTrackingBindingsFromParameters(
+                    trackingReceiver,
+                    parameterInfos[0 .. actual]);
+                writefln("[tracking] initialized %s parameter values from njgQuery (%s bindings seeded).",
+                    actual,
+                    seededBindings);
             } else {
                 writeln("[tracking] njgQuery(parameters data) failed: ", listRes);
             }
