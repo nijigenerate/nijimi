@@ -67,6 +67,21 @@ alias FnGetSharedBuffers = extern(C) gfx.NjgResult function(gfx.RendererHandle, 
 alias FnSetPuppetScale = extern(C) gfx.NjgResult function(gfx.PuppetHandle, float, float);
 alias FnSetPuppetTranslation = extern(C) gfx.NjgResult function(gfx.PuppetHandle, float, float);
 alias FnGetPuppetExtData = extern(C) gfx.NjgResult function(gfx.PuppetHandle, const(char)*, const(ubyte)**, size_t*);
+extern(C) enum NjgQueryKind : uint {
+    Parameters = 1,
+}
+extern(C) struct NjgParameterInfo {
+    uint uuid;
+    bool isVec2;
+    float[2] min;
+    float[2] max;
+    float[2] defaults;
+    const(char)* name;
+    size_t nameLength;
+    float[2] value;
+    float[2] latestInternal;
+}
+alias FnQuery = extern(C) gfx.NjgResult function(gfx.PuppetHandle, NjgQueryKind, void*, size_t, size_t, size_t*);
 extern(C) struct PuppetParameterUpdate {
     uint parameterUuid;
     float valueX;
@@ -91,6 +106,7 @@ struct UnityApi {
     FnSetPuppetScale setPuppetScale;
     FnSetPuppetTranslation setPuppetTranslation;
     FnGetPuppetExtData getPuppetExtData;
+    FnQuery query;
     FnUpdateParameters updateParameters;
 }
 
@@ -159,6 +175,7 @@ UnityApi loadUnityApi(string libPath) {
     api.setPuppetScale = loadOptionalSymbol!FnSetPuppetScale(lib, "njgSetPuppetScale");
     api.setPuppetTranslation = loadOptionalSymbol!FnSetPuppetTranslation(lib, "njgSetPuppetTranslation");
     api.getPuppetExtData = loadOptionalSymbol!FnGetPuppetExtData(lib, "njgGetPuppetExtData");
+    api.query = loadOptionalSymbol!FnQuery(lib, "njgQuery");
     api.updateParameters = loadOptionalSymbol!FnUpdateParameters(lib, "njgUpdateParameters");
     // Explicit runtime init/term provided by DLL.
     api.rtInit = loadOptionalSymbol!FnRtInit(lib, "njgRuntimeInit");
@@ -913,6 +930,33 @@ void main(string[] args) {
         writeln("[tracking] njgGetPuppetExtData not available; bindings not loaded.");
     }
     float[2][uint] trackedParameterValues;
+    if (api.query !is null) {
+        size_t parameterCount = 0;
+        auto countRes = api.query(puppet, NjgQueryKind.Parameters, null, 0, 0, &parameterCount);
+        if (countRes == gfx.NjgResult.Ok && parameterCount > 0) {
+            auto parameterInfos = new NjgParameterInfo[](parameterCount);
+            auto listRes = api.query(
+                puppet,
+                NjgQueryKind.Parameters,
+                parameterInfos.ptr,
+                NjgParameterInfo.sizeof,
+                parameterInfos.length,
+                &parameterCount);
+            if (listRes == gfx.NjgResult.Ok) {
+                auto actual = parameterCount < parameterInfos.length ? parameterCount : parameterInfos.length;
+                foreach (info; parameterInfos[0 .. actual]) {
+                    trackedParameterValues[info.uuid] = info.value;
+                }
+                writefln("[tracking] initialized %s parameter values from njgQuery.", actual);
+            } else {
+                writeln("[tracking] njgQuery(parameters data) failed: ", listRes);
+            }
+        } else if (countRes != gfx.NjgResult.Ok) {
+            writeln("[tracking] njgQuery(parameters count) failed: ", countRes);
+        }
+    } else {
+        writeln("[tracking] njgQuery not available; parameter value mirror starts from zero.");
+    }
     trackingReceiver.setParameterUpdateSink((uint parameterUuid, int axis, float value, bool additive) {
         if (api.updateParameters is null) return;
         if (axis < 0 || axis > 1) return;
