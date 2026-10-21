@@ -37,8 +37,8 @@ void main() {
     vec4 emissionOut = screen(emiColor.xyz, texColor.a) * mult * emissionStrength;
 
     // Emissive
-    outEmissive = emissionOut * texColor.a;
+    outEmissive = emissionOut * (texColor.a * opacity);
 
     // Bumpmap
-    outBump = bmpColor * texColor.a;
+    outBump = bmpColor * (texColor.a * opacity);
 }
