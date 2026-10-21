@@ -655,6 +655,7 @@ class RenderingBackend {
     private GLint gs2MultColor;
     private GLint gs2ScreenColor;
     private GLint mmvp;
+    private GLint moffset;
     private GLint mthreshold;
     private bool partBackendInitialized = false;
 
@@ -686,7 +687,9 @@ class RenderingBackend {
     private int[] viewportWidthStack;
     private int[] viewportHeightStack;
 
-    private RenderResourceHandle[IboKey] iboCache;
+    private struct CachedIbo { RenderResourceHandle handle; bool used; }
+    private CachedIbo[IboKey] iboCache;
+    private bool indexCollectionPending;
 
 public:
     void bindPartShader() {
@@ -727,14 +730,22 @@ public:
         // Generate the color and stencil-depth textures needed
         // Note: we're not using the depth buffer but OpenGL 3.4 does not support stencil-only buffers
         glGenTextures(1, &fAlbedo);
+        glBindTexture(GL_TEXTURE_2D, fAlbedo);
         glGenTextures(1, &fEmissive);
+        glBindTexture(GL_TEXTURE_2D, fEmissive);
         glGenTextures(1, &fBump);
+        glBindTexture(GL_TEXTURE_2D, fBump);
         glGenTextures(1, &fStencil);
+        glBindTexture(GL_TEXTURE_2D, fStencil);
 
         glGenTextures(1, &cfAlbedo);
+        glBindTexture(GL_TEXTURE_2D, cfAlbedo);
         glGenTextures(1, &cfEmissive);
+        glBindTexture(GL_TEXTURE_2D, cfEmissive);
         glGenTextures(1, &cfBump);
+        glBindTexture(GL_TEXTURE_2D, cfBump);
         glGenTextures(1, &cfStencil);
+        glBindTexture(GL_TEXTURE_2D, cfStencil);
 
         // Attach textures to framebuffer
         glBindFramebuffer(GL_FRAMEBUFFER, fBuffer);
@@ -777,7 +788,7 @@ public:
         gEmissionStrength = partShader.getUniformLocation("emissionStrength");
 
         partShaderStage1.use();
-        partShaderStage1.setUniform(partShader.getUniformLocation("albedo"), 0);
+        partShaderStage1.setUniform(partShaderStage1.getUniformLocation("albedo"), 0);
         gs1mvp = partShaderStage1.getUniformLocation("mvp");
         gs1offset = partShaderStage1.getUniformLocation("offset");
         gs1opacity = partShaderStage1.getUniformLocation("opacity");
@@ -799,6 +810,7 @@ public:
         partMaskShader.setUniform(partMaskShader.getUniformLocation("emissive"), 1);
         partMaskShader.setUniform(partMaskShader.getUniformLocation("bumpmap"), 2);
         mmvp = partMaskShader.getUniformLocation("mvp");
+        moffset = partMaskShader.getUniformLocation("offset");
         mthreshold = partMaskShader.getUniformLocation("threshold");
     }
 
@@ -873,13 +885,14 @@ public:
         if (indices is null || count == 0) return RenderResourceHandle.init;
         IboKey key = IboKey(indexHandle, cast(size_t)indices, count);
         if (auto existing = key in iboCache) {
-            return *existing;
+            existing.used = true;
+            return existing.handle;
         }
         RenderResourceHandle ibo;
         createDrawableBuffers(ibo);
         auto idxSlice = indices[0 .. count];
         uploadDrawableIndices(ibo, idxSlice);
-        iboCache[key] = ibo;
+        iboCache[key] = CachedIbo(ibo, true);
         return ibo;
     }
 
@@ -985,7 +998,7 @@ public:
         glEnable(GL_CULL_FACE);
         glDisable(GL_BLEND);
         glFlush();
-        glDrawBuffers(1, [GL_COLOR_ATTACHMENT0].ptr);
+        glDrawBuffer(GL_BACK);
     }
 
     private void ensurePresentProgram() {
@@ -1179,7 +1192,7 @@ void main() {
             mat4 mvpMatrix = renderMatrix * matrix;
 
             partMaskShader.use();
-            partMaskShader.setUniform(offset, packet.origin);
+            partMaskShader.setUniform(moffset, packet.origin);
             partMaskShader.setUniform(mmvp, mvpMatrix);
             partMaskShader.setUniform(mthreshold, packet.maskThreshold);
 
@@ -1188,7 +1201,7 @@ void main() {
 
             renderStage(packet, false);
         } else {
-            if (packet.useMultistageBlend) {
+            if (advancedBlending && isAdvancedBlendMode(packet.blendingMode)) {
                 setupShaderStage(packet, 0, matrix, renderMatrix);
                 renderStage(packet, true);
 
@@ -1241,7 +1254,7 @@ void main() {
             mat4 mvpMatrix = renderMatrix * matrix;
 
             partMaskShader.use();
-            partMaskShader.setUniform(offset, *cast(vec2*)&packet.origin);
+            partMaskShader.setUniform(moffset, *cast(vec2*)&packet.origin);
             partMaskShader.setUniform(mmvp, mvpMatrix);
             partMaskShader.setUniform(mthreshold, packet.maskThreshold);
 
@@ -1250,7 +1263,7 @@ void main() {
 
             renderStage(packet, false);
         } else {
-            if (packet.useMultistageBlend) {
+            if (advancedBlending && isAdvancedBlendMode(cast(BlendMode)packet.blendingMode)) {
                 setupShaderStage(packet, 0, matrix, renderMatrix);
                 renderStage(packet, true);
 
@@ -1648,6 +1661,76 @@ private:
         glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, cast(GLintptr)range.offset, bytes, indices.ptr);
     }
 
+    // Same index disposal/compaction as nijiexpose's nijimi OpenGL port.
+    private void disposeDrawableBuffers(RenderResourceHandle id) {
+        if (sharedIndexRanges.remove(id)) indexCollectionPending = true;
+        if (sharedIndexRanges.length == 0) compactIndexBuffer();
+    }
+
+    private void compactIndexBuffer() {
+        if (!indexCollectionPending) return;
+        indexCollectionPending = false;
+        GLint previousVao;
+        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &previousVao);
+        bindDrawableVao();
+        size_t bytes;
+        foreach (ref range; sharedIndexRanges) bytes += range.data.length * ushort.sizeof;
+        sharedIndexOffset = 0;
+        sharedIndexCapacity = bytes;
+        if (bytes == 0) {
+            if (sharedIndexBuffer) glDeleteBuffers(1, &sharedIndexBuffer);
+            sharedIndexBuffer = 0;
+            sharedIndexRanges = null;
+        } else {
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, sharedIndexBuffer);
+            glBufferData(GL_ELEMENT_ARRAY_BUFFER, bytes, null, GL_DYNAMIC_DRAW);
+            foreach (ref range; sharedIndexRanges) {
+                range.offset = sharedIndexOffset;
+                range.count = range.data.length;
+                range.capacity = range.count * ushort.sizeof;
+                glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, range.offset, range.capacity, range.data.ptr);
+                sharedIndexOffset += range.capacity;
+            }
+        }
+        glBindVertexArray(cast(GLuint)previousVao);
+    }
+
+    // The DLL supplies borrowed packet indices, not drawable-destruction callbacks.
+    // Retain only entries used by this playback; stable frames allocate/copy nothing here.
+    private void beginCachedGeometryFrame() {
+        foreach (ref entry; iboCache) entry.used = false;
+    }
+
+    private void endCachedGeometryFrame() {
+        foreach (key, entry; iboCache) {
+            if (entry.used) continue;
+            disposeDrawableBuffers(entry.handle);
+            iboCache.remove(key);
+        }
+        if (iboCache.length == 0) iboCache = null;
+        compactIndexBuffer();
+    }
+
+    private void releaseSharedBuffer(ref GLuint buffer) {
+        if (buffer == 0) return;
+        GLint previousVao;
+        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &previousVao);
+        bindDrawableVao();
+        glDeleteBuffers(1, &buffer);
+        buffer = 0;
+        glBindVertexArray(cast(GLuint)previousVao);
+    }
+
+    private void releaseCachedGeometry() {
+        iboCache = null;
+        sharedIndexRanges = null;
+        indexCollectionPending = true;
+        compactIndexBuffer();
+        releaseSharedBuffer(sharedVertexBuffer);
+        releaseSharedBuffer(sharedUvBuffer);
+        releaseSharedBuffer(sharedDeformBuffer);
+    }
+
     void ensureMaskBackendInitialized() {
         if (maskBackendInitialized) return;
         maskBackendInitialized = true;
@@ -1755,7 +1838,7 @@ private:
 
     void applyBlendingCapabilities() {
         bool desiredAdvanced = supportsAdvancedBlend();
-        bool desiredCoherent = supportsAdvancedBlendCoherent();
+        bool desiredCoherent = desiredAdvanced && supportsAdvancedBlendCoherent();
         if (desiredCoherent != advancedBlendingCoherent) {
             setAdvancedBlendCoherent(desiredCoherent);
         }
@@ -1764,7 +1847,8 @@ private:
     }
 
     void setAdvancedBlendCoherent(bool enabled) {
-        // Fallback backend: advanced coherent mode is unavailable.
+        if (enabled) glEnable(GL_BLEND_ADVANCED_COHERENT_KHR);
+        else glDisable(GL_BLEND_ADVANCED_COHERENT_KHR);
         advancedBlendingCoherent = enabled;
     }
 
@@ -1830,8 +1914,20 @@ private:
     }
 
     void setAdvancedBlendEquation(BlendMode mode) {
-        // Fallback: use legacy equation path.
-        setLegacyBlendMode(mode);
+        switch (mode) {
+            case BlendMode.Multiply: glBlendEquation(GL_MULTIPLY_KHR); break;
+            case BlendMode.Screen: glBlendEquation(GL_SCREEN_KHR); break;
+            case BlendMode.Overlay: glBlendEquation(GL_OVERLAY_KHR); break;
+            case BlendMode.Darken: glBlendEquation(GL_DARKEN_KHR); break;
+            case BlendMode.Lighten: glBlendEquation(GL_LIGHTEN_KHR); break;
+            case BlendMode.ColorDodge: glBlendEquation(GL_COLORDODGE_KHR); break;
+            case BlendMode.ColorBurn: glBlendEquation(GL_COLORBURN_KHR); break;
+            case BlendMode.HardLight: glBlendEquation(GL_HARDLIGHT_KHR); break;
+            case BlendMode.SoftLight: glBlendEquation(GL_SOFTLIGHT_KHR); break;
+            case BlendMode.Difference: glBlendEquation(GL_DIFFERENCE_KHR); break;
+            case BlendMode.Exclusion: glBlendEquation(GL_EXCLUSION_KHR); break;
+            default: setLegacyBlendMode(mode); break;
+        }
     }
 
     bool isAdvancedBlendMode(BlendMode mode) const {
@@ -1864,7 +1960,7 @@ private:
     }
 
     void issueBlendBarrier() {
-        // no-op when advanced blend barrier is unavailable
+        glBlendBarrierKHR();
     }
 
     void ensureDrawableBackendInitialized() {
@@ -1974,7 +2070,13 @@ private:
     void setupShaderStage(ref PartDrawPacket packet, int stage, mat4 matrix, mat4 renderMatrix) {
         mat4 mvpMatrix = renderMatrix * matrix;
 
-        auto setDrawBuffersSafe = (int desired) {
+        auto setDrawBuffersSafe = (int desired, bool secondaryOnly = false) {
+            GLint framebuffer;
+            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &framebuffer);
+            if (framebuffer == 0) {
+                glDrawBuffer(secondaryOnly ? GL_NONE : GL_BACK);
+                return secondaryOnly ? 0 : 1;
+            }
             GLenum[3] bufs;
             int count = 0;
             auto addIfPresent = (GLenum att) {
@@ -1982,10 +2084,12 @@ private:
                 glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, att,
                     GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &type);
                 if (type != GL_NONE) {
-                    bufs[count++] = att;
+                    bufs[count] = att;
                 }
+                ++count; // Preserve shader output locations even for missing attachments.
             };
-            addIfPresent(GL_COLOR_ATTACHMENT0);
+            if (secondaryOnly) ++count; // Location 0 is disabled for the secondary pass.
+            else addIfPresent(GL_COLOR_ATTACHMENT0);
             if (desired > 1) addIfPresent(GL_COLOR_ATTACHMENT1);
             if (desired > 2) addIfPresent(GL_COLOR_ATTACHMENT2);
             if (count == 0) {
@@ -2008,7 +2112,7 @@ private:
                 applyBlendMode(packet.blendingMode, false);
                 break;
             case 1:
-                setDrawBuffersSafe(2);
+                setDrawBuffersSafe(3, true);
                 partShaderStage2.use();
                 partShaderStage2.setUniform(gs2offset, packet.origin);
                 partShaderStage2.setUniform(gs2mvp, mvpMatrix);
@@ -2037,7 +2141,13 @@ private:
     void setupShaderStage(ref const(NjgPartDrawPacket) packet, int stage, mat4 matrix, mat4 renderMatrix) {
         mat4 mvpMatrix = renderMatrix * matrix;
 
-        auto setDrawBuffersSafe = (int desired) {
+        auto setDrawBuffersSafe = (int desired, bool secondaryOnly = false) {
+            GLint framebuffer;
+            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &framebuffer);
+            if (framebuffer == 0) {
+                glDrawBuffer(secondaryOnly ? GL_NONE : GL_BACK);
+                return secondaryOnly ? 0 : 1;
+            }
             GLenum[3] bufs;
             int count = 0;
             auto addIfPresent = (GLenum att) {
@@ -2045,10 +2155,12 @@ private:
                 glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, att,
                     GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &type);
                 if (type != GL_NONE) {
-                    bufs[count++] = att;
+                    bufs[count] = att;
                 }
+                ++count; // Preserve shader output locations even for missing attachments.
             };
-            addIfPresent(GL_COLOR_ATTACHMENT0);
+            if (secondaryOnly) ++count; // Location 0 is disabled for the secondary pass.
+            else addIfPresent(GL_COLOR_ATTACHMENT0);
             if (desired > 1) addIfPresent(GL_COLOR_ATTACHMENT1);
             if (desired > 2) addIfPresent(GL_COLOR_ATTACHMENT2);
             if (count == 0) {
@@ -2076,7 +2188,7 @@ private:
                 applyBlendMode(blendMode, false);
                 break;
             case 1:
-                setDrawBuffersSafe(2);
+                setDrawBuffersSafe(3, true);
                 partShaderStage2.use();
                 partShaderStage2.setUniform(gs2offset, origin);
                 partShaderStage2.setUniform(gs2mvp, mvpMatrix);
@@ -2149,6 +2261,8 @@ private:
         glBindBuffer(GL_ARRAY_BUFFER, deformBuffer);
         glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, 0, cast(void*)deformLane1Offset);
 
+        // Separate prior clears/ordinary writes from a noncoherent advanced draw.
+        if (advanced) blendModeBarrier(packet.blendingMode);
         drawDrawableElements(packet.indexBuffer, indexCount);
         glDisableVertexAttribArray(0);
         glDisableVertexAttribArray(1);
@@ -2157,9 +2271,6 @@ private:
         glDisableVertexAttribArray(4);
         glDisableVertexAttribArray(5);
 
-        if (advanced) {
-            blendModeBarrier(packet.blendingMode);
-        }
     }
 
     void renderStage(ref const(NjgPartDrawPacket) packet, bool advanced) {
@@ -2209,6 +2320,8 @@ private:
         glBindBuffer(GL_ARRAY_BUFFER, deformBuffer);
         glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, 0, cast(void*)deformLane1Offset);
 
+        // Separate prior clears/ordinary writes from a noncoherent advanced draw.
+        if (advanced) blendModeBarrier(cast(BlendMode)packet.blendingMode);
         drawDrawableElements(ibo, indexCount);
         glDisableVertexAttribArray(0);
         glDisableVertexAttribArray(1);
@@ -2217,9 +2330,6 @@ private:
         glDisableVertexAttribArray(4);
         glDisableVertexAttribArray(5);
 
-        if (advanced) {
-            blendModeBarrier(cast(BlendMode)packet.blendingMode);
-        }
     }
 
     size_t textureNativeHandle(GLTextureHandle texture) {
@@ -2289,6 +2399,7 @@ private __gshared bool gFinalAlphaSampleValid = false;
 private __gshared ubyte gFinalAlphaSample = 255;
 __gshared size_t gNextHandle = 1;
 __gshared bool gBackendInitialized;
+__gshared bool gValidateOpenGL;
 __gshared RenderResourceHandle[DynamicCompositeFramebufferKey] gDynamicFramebufferCache;
 // SDL preview window for texture bytes has been removed to avoid interference.
 
@@ -2425,6 +2536,7 @@ bool sampleTextureAlpha(size_t handle, float u, float v, out ubyte alpha) {
 
 /// Initialize OpenGL backend with optional externally managed window/context.
 OpenGLBackendInit initOpenGLBackend(int width, int height, bool isTest, OpenGLInitOptions opts) {
+    gValidateOpenGL = isTest;
     auto window = opts.windowHandle;
     auto glContext = opts.glContextHandle;
     enforce(glContext !is null,
@@ -2452,18 +2564,24 @@ OpenGLBackendInit initOpenGLBackend(int width, int height, bool isTest, OpenGLIn
 
     // Attach RenderBackend so nlshim Texture can allocate handles.
     inSetRenderBackend(new RenderBackend());
+        if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL init: inSetRenderBackend(new RenderBackend());");
     // Keep viewport state in sync with actual drawable size.
     currentRenderBackend().setViewport(drawableW, drawableH);
+        if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL init: currentRenderBackend().setViewport(drawableW, drawableH);");
     if (!gBackendInitialized) {
         gBackendInitialized = true;
         // Initialize nlshim OpenGL resources to back the queue callbacks.
         auto backend = currentRenderBackend();
         backend.initializeRenderer();
+        if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL init: backend.initializeRenderer();");
         backend.initializePartBackendResources();
+        if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL init: backend.initializePartBackendResources();");
         backend.initializeMaskBackend();
+        if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL init: backend.initializeMaskBackend();");
     }
     // Keep viewport in sync with actual drawable size.
     currentRenderBackend().resizeViewportTargets(drawableW, drawableH);
+        if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL init: currentRenderBackend().resizeViewportTargets(drawableW, drawableH);");
 
     UnityResourceCallbacks cbs;
     cbs.userData = opts.userData;
@@ -2513,6 +2631,7 @@ OpenGLBackendInit initOpenGLBackend(int width, int height, bool isTest, OpenGLIn
             gTextures.remove(handle);
         }
         gCpuTextures.remove(handle);
+        if (gTextures.length == 0) currentRenderBackend().releaseCachedGeometry();
     };
 
     return OpenGLBackendInit(window, glContext, drawableW, drawableH, cbs);
@@ -2532,6 +2651,7 @@ void renderCommands(const OpenGLBackendInit* gl,
     if (gl is null) return;
     auto backend = currentRenderBackend();
     auto debugTextureBackend = currentDebugTextureBackend();
+    backend.beginCachedGeometryFrame();
 
     // Backend/VAO/part resources are initialized once at startup (initOpenGLBackend).
     // Per-frame we only need to ensure the currently active FBO attachments stay bound.
@@ -2539,20 +2659,31 @@ void renderCommands(const OpenGLBackendInit* gl,
 
     // Unity provides SoA buffers including atlasStride (lane0 -> lane1).
     // Offsets/strides are already in command packets, so upload slices as-is.
-    auto uploadSoA = (GLuint target, const NjgBufferSlice slice) {
-        if (target == 0 || slice.data is null || slice.length == 0) return;
+    auto uploadSoA = (ref GLuint target, const NjgBufferSlice slice) {
+        if (slice.length == 0) {
+            backend.releaseSharedBuffer(target);
+            return;
+        }
+        if (slice.data is null) return;
+        if (target == 0) glGenBuffers(1, &target);
         glBindBuffer(GL_ARRAY_BUFFER, target);
         glBufferData(GL_ARRAY_BUFFER, slice.length * float.sizeof, cast(const(void)*)slice.data, GL_DYNAMIC_DRAW);
     };
 
-    uploadSoA(backend.sharedVertexBufferHandle(), snapshot.vertices);
-    uploadSoA(backend.sharedUvBufferHandle(), snapshot.uvs);
-    uploadSoA(backend.sharedDeformBufferHandle(), snapshot.deform);
+    if (view.count == 0) {
+        backend.releaseCachedGeometry();
+    } else {
+        uploadSoA(backend.sharedVertexBuffer, snapshot.vertices);
+        uploadSoA(backend.sharedUvBuffer, snapshot.uvs);
+        uploadSoA(backend.sharedDeformBuffer, snapshot.deform);
+    }
     backend.beginScene();
+    if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL render: backend.beginScene();");
     // Core profile requires a VAO. Bind the shared VAO used by nlshim attributes.
     backend.bindDrawableVao();
     // Bind the part shader up front to avoid prog=0 issues.
     backend.bindPartShader();
+    if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL render: backend.bindPartShader();");
     auto cmds = view.commands[0 .. view.count];
     // Keep backend stateless; the queue already tracks dynamic-composite depth.
     int[] dynDrawStack;
@@ -2603,9 +2734,13 @@ void renderCommands(const OpenGLBackendInit* gl,
             default:
                 break;
         }
+        if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL command " ~ cmd.kind.to!string ~ " draw=" ~ drawCount.to!string);
     }
+    if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL commands");
     backend.postProcessScene();
+    if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL render: backend.postProcessScene();");
     backend.presentSceneToBackbuffer(gl.drawableW, gl.drawableH);
+    if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL render: backend.presentSceneToBackbuffer(gl.drawableW, gl.drawableH);");
     if (gFinalAlphaProbePending &&
         gl.drawableW > 0 && gl.drawableH > 0 &&
         gFinalAlphaProbeWindowW > 0 && gFinalAlphaProbeWindowH > 0) {
@@ -2640,4 +2775,6 @@ void renderCommands(const OpenGLBackendInit* gl,
     glBindVertexArray(0);
     glFlush();
     backend.endScene();
+    backend.endCachedGeometryFrame();
+    if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL render: backend.endScene();");
 }

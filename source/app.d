@@ -632,7 +632,7 @@ void main(string[] args) {
             } else {
                 // OpenGL colorkey path: keep offscreen transparent; convert to colorkey only at present pass.
                 inClearColor = typeof(inClearColor)(0.0f, 0.0f, 0.0f, 0.0f);
-                useColorKeyTransparency = (windowsTransparencyMode() == WindowsTransparencyMode.ColorKey);
+                useColorKeyTransparency = transparentWindowEnabled && (windowsTransparencyMode() == WindowsTransparencyMode.ColorKey);
             }
         }
     }
@@ -1052,7 +1052,7 @@ void main(string[] args) {
     float[2][uint] trackedParameterValues;
     if (api.query !is null) {
         size_t parameterCount = 0;
-        auto countRes = api.query(puppet, NjgQueryKind.Parameters, null, 0, 0, &parameterCount);
+        auto countRes = api.query(puppet, NjgQueryKind.Parameters, null, NjgParameterInfo.sizeof, 0, &parameterCount);
         if (countRes == gfx.NjgResult.Ok && parameterCount > 0) {
             auto parameterInfos = new NjgParameterInfo[](parameterCount);
             auto listRes = api.query(

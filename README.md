@@ -186,4 +186,3 @@ Current implementation includes:
 - mask/stencil path under active refinement
 
 If rendering differs from OpenGL on specific assets, treat Vulkan as work-in-progress and verify against `opengl` configuration.
-
