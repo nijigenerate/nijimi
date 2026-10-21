@@ -14,7 +14,7 @@ dependency "imagefmt" version="~>2.1.0"
 dependency "facetrack-d" path="../ng-facetrack-d"
 stringImportPaths "source"
 
-versions "SDL_3_2" "GL_32"
+versions "SDL_3_2" "GL_32" "GL_KHR_blend_equation_advanced"
 subConfiguration "facetrack-d" "default"
 
 importPaths "source"

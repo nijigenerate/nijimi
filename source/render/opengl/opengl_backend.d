@@ -655,6 +655,7 @@ class RenderingBackend {
     private GLint gs2MultColor;
     private GLint gs2ScreenColor;
     private GLint mmvp;
+    private GLint moffset;
     private GLint mthreshold;
     private bool partBackendInitialized = false;
 
@@ -727,14 +728,22 @@ public:
         // Generate the color and stencil-depth textures needed
         // Note: we're not using the depth buffer but OpenGL 3.4 does not support stencil-only buffers
         glGenTextures(1, &fAlbedo);
+        glBindTexture(GL_TEXTURE_2D, fAlbedo);
         glGenTextures(1, &fEmissive);
+        glBindTexture(GL_TEXTURE_2D, fEmissive);
         glGenTextures(1, &fBump);
+        glBindTexture(GL_TEXTURE_2D, fBump);
         glGenTextures(1, &fStencil);
+        glBindTexture(GL_TEXTURE_2D, fStencil);
 
         glGenTextures(1, &cfAlbedo);
+        glBindTexture(GL_TEXTURE_2D, cfAlbedo);
         glGenTextures(1, &cfEmissive);
+        glBindTexture(GL_TEXTURE_2D, cfEmissive);
         glGenTextures(1, &cfBump);
+        glBindTexture(GL_TEXTURE_2D, cfBump);
         glGenTextures(1, &cfStencil);
+        glBindTexture(GL_TEXTURE_2D, cfStencil);
 
         // Attach textures to framebuffer
         glBindFramebuffer(GL_FRAMEBUFFER, fBuffer);
@@ -777,7 +786,7 @@ public:
         gEmissionStrength = partShader.getUniformLocation("emissionStrength");
 
         partShaderStage1.use();
-        partShaderStage1.setUniform(partShader.getUniformLocation("albedo"), 0);
+        partShaderStage1.setUniform(partShaderStage1.getUniformLocation("albedo"), 0);
         gs1mvp = partShaderStage1.getUniformLocation("mvp");
         gs1offset = partShaderStage1.getUniformLocation("offset");
         gs1opacity = partShaderStage1.getUniformLocation("opacity");
@@ -799,6 +808,7 @@ public:
         partMaskShader.setUniform(partMaskShader.getUniformLocation("emissive"), 1);
         partMaskShader.setUniform(partMaskShader.getUniformLocation("bumpmap"), 2);
         mmvp = partMaskShader.getUniformLocation("mvp");
+        moffset = partMaskShader.getUniformLocation("offset");
         mthreshold = partMaskShader.getUniformLocation("threshold");
     }
 
@@ -985,7 +995,7 @@ public:
         glEnable(GL_CULL_FACE);
         glDisable(GL_BLEND);
         glFlush();
-        glDrawBuffers(1, [GL_COLOR_ATTACHMENT0].ptr);
+        glDrawBuffer(GL_BACK);
     }
 
     private void ensurePresentProgram() {
@@ -1179,7 +1189,7 @@ void main() {
             mat4 mvpMatrix = renderMatrix * matrix;
 
             partMaskShader.use();
-            partMaskShader.setUniform(offset, packet.origin);
+            partMaskShader.setUniform(moffset, packet.origin);
             partMaskShader.setUniform(mmvp, mvpMatrix);
             partMaskShader.setUniform(mthreshold, packet.maskThreshold);
 
@@ -1188,7 +1198,7 @@ void main() {
 
             renderStage(packet, false);
         } else {
-            if (packet.useMultistageBlend) {
+            if (advancedBlending && isAdvancedBlendMode(packet.blendingMode)) {
                 setupShaderStage(packet, 0, matrix, renderMatrix);
                 renderStage(packet, true);
 
@@ -1241,7 +1251,7 @@ void main() {
             mat4 mvpMatrix = renderMatrix * matrix;
 
             partMaskShader.use();
-            partMaskShader.setUniform(offset, *cast(vec2*)&packet.origin);
+            partMaskShader.setUniform(moffset, *cast(vec2*)&packet.origin);
             partMaskShader.setUniform(mmvp, mvpMatrix);
             partMaskShader.setUniform(mthreshold, packet.maskThreshold);
 
@@ -1250,7 +1260,7 @@ void main() {
 
             renderStage(packet, false);
         } else {
-            if (packet.useMultistageBlend) {
+            if (advancedBlending && isAdvancedBlendMode(cast(BlendMode)packet.blendingMode)) {
                 setupShaderStage(packet, 0, matrix, renderMatrix);
                 renderStage(packet, true);
 
@@ -1755,7 +1765,7 @@ private:
 
     void applyBlendingCapabilities() {
         bool desiredAdvanced = supportsAdvancedBlend();
-        bool desiredCoherent = supportsAdvancedBlendCoherent();
+        bool desiredCoherent = desiredAdvanced && supportsAdvancedBlendCoherent();
         if (desiredCoherent != advancedBlendingCoherent) {
             setAdvancedBlendCoherent(desiredCoherent);
         }
@@ -1764,7 +1774,8 @@ private:
     }
 
     void setAdvancedBlendCoherent(bool enabled) {
-        // Fallback backend: advanced coherent mode is unavailable.
+        if (enabled) glEnable(GL_BLEND_ADVANCED_COHERENT_KHR);
+        else glDisable(GL_BLEND_ADVANCED_COHERENT_KHR);
         advancedBlendingCoherent = enabled;
     }
 
@@ -1830,8 +1841,20 @@ private:
     }
 
     void setAdvancedBlendEquation(BlendMode mode) {
-        // Fallback: use legacy equation path.
-        setLegacyBlendMode(mode);
+        switch (mode) {
+            case BlendMode.Multiply: glBlendEquation(GL_MULTIPLY_KHR); break;
+            case BlendMode.Screen: glBlendEquation(GL_SCREEN_KHR); break;
+            case BlendMode.Overlay: glBlendEquation(GL_OVERLAY_KHR); break;
+            case BlendMode.Darken: glBlendEquation(GL_DARKEN_KHR); break;
+            case BlendMode.Lighten: glBlendEquation(GL_LIGHTEN_KHR); break;
+            case BlendMode.ColorDodge: glBlendEquation(GL_COLORDODGE_KHR); break;
+            case BlendMode.ColorBurn: glBlendEquation(GL_COLORBURN_KHR); break;
+            case BlendMode.HardLight: glBlendEquation(GL_HARDLIGHT_KHR); break;
+            case BlendMode.SoftLight: glBlendEquation(GL_SOFTLIGHT_KHR); break;
+            case BlendMode.Difference: glBlendEquation(GL_DIFFERENCE_KHR); break;
+            case BlendMode.Exclusion: glBlendEquation(GL_EXCLUSION_KHR); break;
+            default: setLegacyBlendMode(mode); break;
+        }
     }
 
     bool isAdvancedBlendMode(BlendMode mode) const {
@@ -1864,7 +1887,7 @@ private:
     }
 
     void issueBlendBarrier() {
-        // no-op when advanced blend barrier is unavailable
+        glBlendBarrierKHR();
     }
 
     void ensureDrawableBackendInitialized() {
@@ -2289,6 +2312,7 @@ private __gshared bool gFinalAlphaSampleValid = false;
 private __gshared ubyte gFinalAlphaSample = 255;
 __gshared size_t gNextHandle = 1;
 __gshared bool gBackendInitialized;
+__gshared bool gValidateOpenGL;
 __gshared RenderResourceHandle[DynamicCompositeFramebufferKey] gDynamicFramebufferCache;
 // SDL preview window for texture bytes has been removed to avoid interference.
 
@@ -2425,6 +2449,7 @@ bool sampleTextureAlpha(size_t handle, float u, float v, out ubyte alpha) {
 
 /// Initialize OpenGL backend with optional externally managed window/context.
 OpenGLBackendInit initOpenGLBackend(int width, int height, bool isTest, OpenGLInitOptions opts) {
+    gValidateOpenGL = isTest;
     auto window = opts.windowHandle;
     auto glContext = opts.glContextHandle;
     enforce(glContext !is null,
@@ -2452,18 +2477,24 @@ OpenGLBackendInit initOpenGLBackend(int width, int height, bool isTest, OpenGLIn
 
     // Attach RenderBackend so nlshim Texture can allocate handles.
     inSetRenderBackend(new RenderBackend());
+        if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL init: inSetRenderBackend(new RenderBackend());");
     // Keep viewport state in sync with actual drawable size.
     currentRenderBackend().setViewport(drawableW, drawableH);
+        if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL init: currentRenderBackend().setViewport(drawableW, drawableH);");
     if (!gBackendInitialized) {
         gBackendInitialized = true;
         // Initialize nlshim OpenGL resources to back the queue callbacks.
         auto backend = currentRenderBackend();
         backend.initializeRenderer();
+        if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL init: backend.initializeRenderer();");
         backend.initializePartBackendResources();
+        if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL init: backend.initializePartBackendResources();");
         backend.initializeMaskBackend();
+        if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL init: backend.initializeMaskBackend();");
     }
     // Keep viewport in sync with actual drawable size.
     currentRenderBackend().resizeViewportTargets(drawableW, drawableH);
+        if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL init: currentRenderBackend().resizeViewportTargets(drawableW, drawableH);");
 
     UnityResourceCallbacks cbs;
     cbs.userData = opts.userData;
@@ -2549,10 +2580,12 @@ void renderCommands(const OpenGLBackendInit* gl,
     uploadSoA(backend.sharedUvBufferHandle(), snapshot.uvs);
     uploadSoA(backend.sharedDeformBufferHandle(), snapshot.deform);
     backend.beginScene();
+    if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL render: backend.beginScene();");
     // Core profile requires a VAO. Bind the shared VAO used by nlshim attributes.
     backend.bindDrawableVao();
     // Bind the part shader up front to avoid prog=0 issues.
     backend.bindPartShader();
+    if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL render: backend.bindPartShader();");
     auto cmds = view.commands[0 .. view.count];
     // Keep backend stateless; the queue already tracks dynamic-composite depth.
     int[] dynDrawStack;
@@ -2603,9 +2636,13 @@ void renderCommands(const OpenGLBackendInit* gl,
             default:
                 break;
         }
+        if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL command " ~ cmd.kind.to!string ~ " draw=" ~ drawCount.to!string);
     }
+    if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL commands");
     backend.postProcessScene();
+    if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL render: backend.postProcessScene();");
     backend.presentSceneToBackbuffer(gl.drawableW, gl.drawableH);
+    if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL render: backend.presentSceneToBackbuffer(gl.drawableW, gl.drawableH);");
     if (gFinalAlphaProbePending &&
         gl.drawableW > 0 && gl.drawableH > 0 &&
         gFinalAlphaProbeWindowW > 0 && gFinalAlphaProbeWindowH > 0) {
@@ -2640,4 +2677,5 @@ void renderCommands(const OpenGLBackendInit* gl,
     glBindVertexArray(0);
     glFlush();
     backend.endScene();
+    if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL render: backend.endScene();");
 }
