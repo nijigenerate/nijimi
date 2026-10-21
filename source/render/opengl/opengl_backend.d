@@ -1997,7 +1997,13 @@ private:
     void setupShaderStage(ref PartDrawPacket packet, int stage, mat4 matrix, mat4 renderMatrix) {
         mat4 mvpMatrix = renderMatrix * matrix;
 
-        auto setDrawBuffersSafe = (int desired) {
+        auto setDrawBuffersSafe = (int desired, bool secondaryOnly = false) {
+            GLint framebuffer;
+            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &framebuffer);
+            if (framebuffer == 0) {
+                glDrawBuffer(secondaryOnly ? GL_NONE : GL_BACK);
+                return secondaryOnly ? 0 : 1;
+            }
             GLenum[3] bufs;
             int count = 0;
             auto addIfPresent = (GLenum att) {
@@ -2005,10 +2011,12 @@ private:
                 glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, att,
                     GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &type);
                 if (type != GL_NONE) {
-                    bufs[count++] = att;
+                    bufs[count] = att;
                 }
+                ++count; // Preserve shader output locations even for missing attachments.
             };
-            addIfPresent(GL_COLOR_ATTACHMENT0);
+            if (secondaryOnly) ++count; // Location 0 is disabled for the secondary pass.
+            else addIfPresent(GL_COLOR_ATTACHMENT0);
             if (desired > 1) addIfPresent(GL_COLOR_ATTACHMENT1);
             if (desired > 2) addIfPresent(GL_COLOR_ATTACHMENT2);
             if (count == 0) {
@@ -2031,7 +2039,7 @@ private:
                 applyBlendMode(packet.blendingMode, false);
                 break;
             case 1:
-                setDrawBuffersSafe(2);
+                setDrawBuffersSafe(3, true);
                 partShaderStage2.use();
                 partShaderStage2.setUniform(gs2offset, packet.origin);
                 partShaderStage2.setUniform(gs2mvp, mvpMatrix);
@@ -2060,7 +2068,13 @@ private:
     void setupShaderStage(ref const(NjgPartDrawPacket) packet, int stage, mat4 matrix, mat4 renderMatrix) {
         mat4 mvpMatrix = renderMatrix * matrix;
 
-        auto setDrawBuffersSafe = (int desired) {
+        auto setDrawBuffersSafe = (int desired, bool secondaryOnly = false) {
+            GLint framebuffer;
+            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &framebuffer);
+            if (framebuffer == 0) {
+                glDrawBuffer(secondaryOnly ? GL_NONE : GL_BACK);
+                return secondaryOnly ? 0 : 1;
+            }
             GLenum[3] bufs;
             int count = 0;
             auto addIfPresent = (GLenum att) {
@@ -2068,10 +2082,12 @@ private:
                 glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, att,
                     GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &type);
                 if (type != GL_NONE) {
-                    bufs[count++] = att;
+                    bufs[count] = att;
                 }
+                ++count; // Preserve shader output locations even for missing attachments.
             };
-            addIfPresent(GL_COLOR_ATTACHMENT0);
+            if (secondaryOnly) ++count; // Location 0 is disabled for the secondary pass.
+            else addIfPresent(GL_COLOR_ATTACHMENT0);
             if (desired > 1) addIfPresent(GL_COLOR_ATTACHMENT1);
             if (desired > 2) addIfPresent(GL_COLOR_ATTACHMENT2);
             if (count == 0) {
@@ -2099,7 +2115,7 @@ private:
                 applyBlendMode(blendMode, false);
                 break;
             case 1:
-                setDrawBuffersSafe(2);
+                setDrawBuffersSafe(3, true);
                 partShaderStage2.use();
                 partShaderStage2.setUniform(gs2offset, origin);
                 partShaderStage2.setUniform(gs2mvp, mvpMatrix);
@@ -2172,6 +2188,8 @@ private:
         glBindBuffer(GL_ARRAY_BUFFER, deformBuffer);
         glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, 0, cast(void*)deformLane1Offset);
 
+        // Separate prior clears/ordinary writes from a noncoherent advanced draw.
+        if (advanced) blendModeBarrier(packet.blendingMode);
         drawDrawableElements(packet.indexBuffer, indexCount);
         glDisableVertexAttribArray(0);
         glDisableVertexAttribArray(1);
@@ -2180,9 +2198,6 @@ private:
         glDisableVertexAttribArray(4);
         glDisableVertexAttribArray(5);
 
-        if (advanced) {
-            blendModeBarrier(packet.blendingMode);
-        }
     }
 
     void renderStage(ref const(NjgPartDrawPacket) packet, bool advanced) {
@@ -2232,6 +2247,8 @@ private:
         glBindBuffer(GL_ARRAY_BUFFER, deformBuffer);
         glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, 0, cast(void*)deformLane1Offset);
 
+        // Separate prior clears/ordinary writes from a noncoherent advanced draw.
+        if (advanced) blendModeBarrier(cast(BlendMode)packet.blendingMode);
         drawDrawableElements(ibo, indexCount);
         glDisableVertexAttribArray(0);
         glDisableVertexAttribArray(1);
@@ -2240,9 +2257,6 @@ private:
         glDisableVertexAttribArray(4);
         glDisableVertexAttribArray(5);
 
-        if (advanced) {
-            blendModeBarrier(cast(BlendMode)packet.blendingMode);
-        }
     }
 
     size_t textureNativeHandle(GLTextureHandle texture) {

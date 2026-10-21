@@ -18,6 +18,9 @@ $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
 foreach ($name in $variants.Keys) {
     $capture = Join-Path $OutputDirectory "$name.png"
     $log = Join-Path $OutputDirectory "$name.log"
+    if (Test-Path -LiteralPath $capture) {
+        Remove-Item -LiteralPath $capture
+    }
     & $Viewer $Model 720 720 --unity-dll $variants[$name] --test --frames $Frames --no-transparent-window --capture $capture *> $log
     if ($LASTEXITCODE -ne 0) { throw "$name failed: see $log" }
     if (!(Test-Path -LiteralPath $capture)) { throw "$name did not produce a capture" }
