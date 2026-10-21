@@ -687,7 +687,9 @@ class RenderingBackend {
     private int[] viewportWidthStack;
     private int[] viewportHeightStack;
 
-    private RenderResourceHandle[IboKey] iboCache;
+    private struct CachedIbo { RenderResourceHandle handle; bool used; }
+    private CachedIbo[IboKey] iboCache;
+    private bool indexCollectionPending;
 
 public:
     void bindPartShader() {
@@ -883,13 +885,14 @@ public:
         if (indices is null || count == 0) return RenderResourceHandle.init;
         IboKey key = IboKey(indexHandle, cast(size_t)indices, count);
         if (auto existing = key in iboCache) {
-            return *existing;
+            existing.used = true;
+            return existing.handle;
         }
         RenderResourceHandle ibo;
         createDrawableBuffers(ibo);
         auto idxSlice = indices[0 .. count];
         uploadDrawableIndices(ibo, idxSlice);
-        iboCache[key] = ibo;
+        iboCache[key] = CachedIbo(ibo, true);
         return ibo;
     }
 
@@ -1656,6 +1659,76 @@ private:
         sharedIndexRanges[ibo] = range;
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, sharedIndexBuffer);
         glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, cast(GLintptr)range.offset, bytes, indices.ptr);
+    }
+
+    // Same index disposal/compaction as nijiexpose's nijimi OpenGL port.
+    private void disposeDrawableBuffers(RenderResourceHandle id) {
+        if (sharedIndexRanges.remove(id)) indexCollectionPending = true;
+        if (sharedIndexRanges.length == 0) compactIndexBuffer();
+    }
+
+    private void compactIndexBuffer() {
+        if (!indexCollectionPending) return;
+        indexCollectionPending = false;
+        GLint previousVao;
+        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &previousVao);
+        bindDrawableVao();
+        size_t bytes;
+        foreach (ref range; sharedIndexRanges) bytes += range.data.length * ushort.sizeof;
+        sharedIndexOffset = 0;
+        sharedIndexCapacity = bytes;
+        if (bytes == 0) {
+            if (sharedIndexBuffer) glDeleteBuffers(1, &sharedIndexBuffer);
+            sharedIndexBuffer = 0;
+            sharedIndexRanges = null;
+        } else {
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, sharedIndexBuffer);
+            glBufferData(GL_ELEMENT_ARRAY_BUFFER, bytes, null, GL_DYNAMIC_DRAW);
+            foreach (ref range; sharedIndexRanges) {
+                range.offset = sharedIndexOffset;
+                range.count = range.data.length;
+                range.capacity = range.count * ushort.sizeof;
+                glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, range.offset, range.capacity, range.data.ptr);
+                sharedIndexOffset += range.capacity;
+            }
+        }
+        glBindVertexArray(cast(GLuint)previousVao);
+    }
+
+    // The DLL supplies borrowed packet indices, not drawable-destruction callbacks.
+    // Retain only entries used by this playback; stable frames allocate/copy nothing here.
+    private void beginCachedGeometryFrame() {
+        foreach (ref entry; iboCache) entry.used = false;
+    }
+
+    private void endCachedGeometryFrame() {
+        foreach (key, entry; iboCache) {
+            if (entry.used) continue;
+            disposeDrawableBuffers(entry.handle);
+            iboCache.remove(key);
+        }
+        if (iboCache.length == 0) iboCache = null;
+        compactIndexBuffer();
+    }
+
+    private void releaseSharedBuffer(ref GLuint buffer) {
+        if (buffer == 0) return;
+        GLint previousVao;
+        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &previousVao);
+        bindDrawableVao();
+        glDeleteBuffers(1, &buffer);
+        buffer = 0;
+        glBindVertexArray(cast(GLuint)previousVao);
+    }
+
+    private void releaseCachedGeometry() {
+        iboCache = null;
+        sharedIndexRanges = null;
+        indexCollectionPending = true;
+        compactIndexBuffer();
+        releaseSharedBuffer(sharedVertexBuffer);
+        releaseSharedBuffer(sharedUvBuffer);
+        releaseSharedBuffer(sharedDeformBuffer);
     }
 
     void ensureMaskBackendInitialized() {
@@ -2558,6 +2631,7 @@ OpenGLBackendInit initOpenGLBackend(int width, int height, bool isTest, OpenGLIn
             gTextures.remove(handle);
         }
         gCpuTextures.remove(handle);
+        if (gTextures.length == 0) currentRenderBackend().releaseCachedGeometry();
     };
 
     return OpenGLBackendInit(window, glContext, drawableW, drawableH, cbs);
@@ -2577,6 +2651,7 @@ void renderCommands(const OpenGLBackendInit* gl,
     if (gl is null) return;
     auto backend = currentRenderBackend();
     auto debugTextureBackend = currentDebugTextureBackend();
+    backend.beginCachedGeometryFrame();
 
     // Backend/VAO/part resources are initialized once at startup (initOpenGLBackend).
     // Per-frame we only need to ensure the currently active FBO attachments stay bound.
@@ -2584,15 +2659,24 @@ void renderCommands(const OpenGLBackendInit* gl,
 
     // Unity provides SoA buffers including atlasStride (lane0 -> lane1).
     // Offsets/strides are already in command packets, so upload slices as-is.
-    auto uploadSoA = (GLuint target, const NjgBufferSlice slice) {
-        if (target == 0 || slice.data is null || slice.length == 0) return;
+    auto uploadSoA = (ref GLuint target, const NjgBufferSlice slice) {
+        if (slice.length == 0) {
+            backend.releaseSharedBuffer(target);
+            return;
+        }
+        if (slice.data is null) return;
+        if (target == 0) glGenBuffers(1, &target);
         glBindBuffer(GL_ARRAY_BUFFER, target);
         glBufferData(GL_ARRAY_BUFFER, slice.length * float.sizeof, cast(const(void)*)slice.data, GL_DYNAMIC_DRAW);
     };
 
-    uploadSoA(backend.sharedVertexBufferHandle(), snapshot.vertices);
-    uploadSoA(backend.sharedUvBufferHandle(), snapshot.uvs);
-    uploadSoA(backend.sharedDeformBufferHandle(), snapshot.deform);
+    if (view.count == 0) {
+        backend.releaseCachedGeometry();
+    } else {
+        uploadSoA(backend.sharedVertexBuffer, snapshot.vertices);
+        uploadSoA(backend.sharedUvBuffer, snapshot.uvs);
+        uploadSoA(backend.sharedDeformBuffer, snapshot.deform);
+    }
     backend.beginScene();
     if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL render: backend.beginScene();");
     // Core profile requires a VAO. Bind the shared VAO used by nlshim attributes.
@@ -2691,5 +2775,6 @@ void renderCommands(const OpenGLBackendInit* gl,
     glBindVertexArray(0);
     glFlush();
     backend.endScene();
+    backend.endCachedGeometryFrame();
     if (gValidateOpenGL) enforce(glGetError() == GL_NO_ERROR, "GL render: backend.endScene();");
 }
