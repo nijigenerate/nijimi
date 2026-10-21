@@ -271,7 +271,6 @@ enum ToggleOption {
 }
 
 struct CliOptions {
-    string capturePath;
     bool isTest = false;
     int framesFlag = -1;
     string unityDllFlavor;
@@ -528,11 +527,6 @@ private CliOptions parseCliOptions(string[] args) {
     CliOptions out_;
     for (size_t i = 1; i < args.length; ++i) {
         auto arg = args[i];
-        if (arg == "--capture") {
-            enforce(i + 1 < args.length, "--capture requires a PNG path");
-            out_.capturePath = args[++i];
-            continue;
-        }
         if (arg == "--test") {
             out_.isTest = true;
             continue;
@@ -604,19 +598,13 @@ private CliOptions parseCliOptions(string[] args) {
 void main(string[] args) {
     auto cli = parseCliOptions(args);
     bool isTest = cli.isTest;
-    enforce(cli.capturePath.length == 0 || isTest, "--capture requires --test");
-    version (EnableVulkanBackend) {
-        enforce(cli.capturePath.length == 0, "--capture currently requires OpenGL");
-    } else version (EnableDirectXBackend) {
-        enforce(cli.capturePath.length == 0, "--capture currently requires OpenGL");
-    }
     string[] positional = cli.positional;
     int framesFlag = cli.framesFlag;
     // Defaults for test mode
     int testMaxFrames = 5;
     auto testTimeout = 5.seconds;
     if (positional.length < 1) {
-        writeln("Usage: nijimi <puppet.inp|puppet.inx> [width height] [--test] [--frames N] [--capture output.png] [--unity-dll nijilive|nicxlive|PATH] [--transparent-window|--no-transparent-window] [--transparent-window-retry|--no-transparent-window-retry] [--transparent-debug] [--drag-sensitivity <value>]");
+        writeln("Usage: nijimi <puppet.inp|puppet.inx> [width height] [--test] [--frames N] [--unity-dll nijilive|nicxlive|PATH] [--transparent-window|--no-transparent-window] [--transparent-window-retry|--no-transparent-window-retry] [--transparent-debug] [--drag-sensitivity <value>]");
         return;
     }
     string puppetPath = resolvePuppetPath(positional[0]);
@@ -781,7 +769,7 @@ void main(string[] args) {
             "SDL_CreateWindow failed (vulkan): " ~
             (SDL_GetError() is null ? "" : fromStringz(SDL_GetError()).idup) ~
             " ; ensure Vulkan loader/MoltenVK is installed (e.g. /opt/homebrew/lib/libvulkan.1.dylib)");
-        if (!isTest) configureWindowBorderlessDesktop(hostWindow, &transparentDebug);
+        configureWindowBorderlessDesktop(hostWindow, &transparentDebug);
         configureWindowAlwaysOnTop(hostWindow, true);
         configureWindowInputPolicy(hostWindow, false, &transparentDebug);
 
@@ -821,7 +809,7 @@ void main(string[] args) {
             width, height,
             SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
         enforce(hostWindow !is null, "SDL_CreateWindow failed (directx)");
-        if (!isTest) configureWindowBorderlessDesktop(hostWindow, &transparentDebug);
+        configureWindowBorderlessDesktop(hostWindow, &transparentDebug);
         configureWindowAlwaysOnTop(hostWindow, true);
         configureWindowInputPolicy(hostWindow, false, &transparentDebug);
 
@@ -847,7 +835,7 @@ void main(string[] args) {
             width, height,
             SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
         enforce(hostWindow !is null, "SDL_CreateWindow failed (opengl)");
-        if (!isTest) configureWindowBorderlessDesktop(hostWindow, &transparentDebug);
+        configureWindowBorderlessDesktop(hostWindow, &transparentDebug);
         configureWindowAlwaysOnTop(hostWindow, true);
         configureWindowInputPolicy(hostWindow, false, &transparentDebug);
 
@@ -1119,7 +1107,7 @@ void main(string[] args) {
             writeln("njgUpdateParameters failed: ", res);
         }
     });
-    if (!isTest) trackingReceiver.setupVMCReceiver();
+    trackingReceiver.setupVMCReceiver();
 
     bool running = true;
     int frameCount = 0;
@@ -1311,8 +1299,7 @@ void main(string[] args) {
         prev = now;
         double deltaSec = delta.total!"nsecs" / 1_000_000_000.0;
 
-        if (isTest) deltaSec = 1.0 / 60.0;
-        else trackingReceiver.update();
+        trackingReceiver.update();
         enforce(api.beginFrame(renderer, &frameCfg) == gfx.NjgResult.Ok, "njgBeginFrame failed");
         enforce(api.tickPuppet(puppet, deltaSec) == gfx.NjgResult.Ok, "njgTickPuppet failed");
 
@@ -1351,13 +1338,7 @@ void main(string[] args) {
         SDL_GetWindowSize(hostWindow, &windowW, &windowH);
         updatePuppetScreenBounds(puppetBounds, dragMap, view, snapshot, windowW, windowH);
 
-        version (EnableVulkanBackend) {} else version (EnableDirectXBackend) {} else {
-            if (isTest) { auto err = glGetError(); enforce(err == GL_NO_ERROR, "OpenGL before rendering: " ~ err.to!string); }
-        }
         gfx.renderCommands(&backendInit, &snapshot, &view);
-        version (EnableVulkanBackend) {} else version (EnableDirectXBackend) {} else {
-            if (isTest) { auto err = glGetError(); enforce(err == GL_NO_ERROR, "OpenGL rendering: " ~ err.to!string); }
-        }
 
         // Some SDL backends create/replace native subviews lazily after first render.
         // Re-apply transparency once to catch late-created view/layer objects.
@@ -1383,25 +1364,6 @@ void main(string[] args) {
             mousePassthroughActive = false;
         }
 
-        version (EnableVulkanBackend) {} else version (EnableDirectXBackend) {} else {
-            if (cli.capturePath.length && frameCount + 1 == testMaxFrames) {
-                import imagefmt : write_image;
-                int w = backendInit.drawableW, h = backendInit.drawableH;
-                auto pixels = new ubyte[](cast(size_t)w * h * 4);
-                glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-                glReadBuffer(GL_BACK);
-                glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels.ptr);
-                enforce(glGetError() == GL_NO_ERROR, "OpenGL capture failed");
-                auto flipped = new ubyte[](pixels.length);
-                foreach (y; 0 .. h) {
-                    auto stride = cast(size_t)w * 4;
-                    flipped[y * stride .. (y + 1) * stride] = pixels[(h - 1 - y) * stride .. (h - y) * stride];
-                }
-                enforce(write_image(cli.capturePath, w, h, flipped, 4) == 0, "PNG capture failed");
-                writefln("[capture] %s (%sx%s), commands=%s vertices=%s", cli.capturePath, w, h, view.count, snapshot.vertices.length / 2);
-            }
-        }
         api.flushCommands(renderer);
         version (EnableVulkanBackend) {
         } else version (EnableDirectXBackend) {
@@ -1416,7 +1378,6 @@ void main(string[] args) {
         }
         auto elapsed = now - startTime;
         if (isTest && elapsed > testTimeout) {
-            enforce(cli.capturePath.length == 0, "Capture timed out before requested frame");
             writefln("Exit: elapsed %s > test-timeout %s", elapsed.total!"seconds", testTimeout.total!"seconds");
             break;
         }
