@@ -47,7 +47,8 @@ public:
     override
     void stop() {
         if (server) {
-            server.close();
+            // Finalize while the socket is still alive, then clear its references.
+            destroy(server);
             server = null;
         }
     }
