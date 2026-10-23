@@ -641,7 +641,8 @@ void main(string[] args) {
         backendName, puppetPath, width, height, isTest, testMaxFrames, testTimeout);
     version (Windows) {
         auto mode = windowsTransparencyMode();
-        writefln("Windows transparency mode: %s", mode == WindowsTransparencyMode.ColorKey ? "colorkey" : "dwm");
+        writefln("Windows transparency mode: %s", mode == WindowsTransparencyMode.ColorKey ? "colorkey" :
+            mode == WindowsTransparencyMode.Composition ? "composition" : "dwm");
     }
     transparentDebug("[transparent] option enabled=" ~ transparentWindowEnabled.to!string ~ " retry=" ~ transparentWindowRetry.to!string);
 
@@ -807,7 +808,8 @@ void main(string[] args) {
 
         hostWindow = SDL_CreateWindow("nijimi",
             width, height,
-            SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+            SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY |
+            (transparentWindowEnabled ? SDL_WINDOW_TRANSPARENT : 0));
         enforce(hostWindow !is null, "SDL_CreateWindow failed (directx)");
         configureWindowBorderlessDesktop(hostWindow, &transparentDebug);
         configureWindowAlwaysOnTop(hostWindow, true);
@@ -822,6 +824,7 @@ void main(string[] args) {
         SDL_GetWindowSizeInPixels(hostWindow, &drawableW, &drawableH);
 
         gfx.DirectXInitOptions opts;
+        opts.transparentWindow = transparentWindowEnabled;
         opts.windowHandle = cast(void*)hostWindow;
         opts.hwnd = hwnd;
         opts.drawableW = drawableW;

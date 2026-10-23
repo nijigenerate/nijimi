@@ -2,6 +2,7 @@ module render.directx.directx_backend;
 
 version (EnableDirectXBackend) {
 
+import render.directx.composition;
 import std.algorithm : max;
 import std.conv : to;
 import std.exception : enforce;
@@ -348,6 +349,10 @@ private:
         enum uint FrameCount = 2;
 
         HWND hwnd = null;
+        bool transparentWindow = true;
+        CompositionDevice compositionDevice;
+        CompositionTarget compositionTarget;
+        CompositionVisual compositionVisual;
         int viewportW = 0;
         int viewportH = 0;
 
@@ -687,20 +692,19 @@ private:
             sd.BufferCount = FrameCount;
             sd.Scaling = DXGI_SCALING.STRETCH;
             sd.SwapEffect = DXGI_SWAP_EFFECT.FLIP_SEQUENTIAL;
-            sd.AlphaMode = DXGI_ALPHA_MODE.IGNORE;
+            sd.AlphaMode = transparentWindow ? DXGI_ALPHA_MODE.PREMULTIPLIED : DXGI_ALPHA_MODE.IGNORE;
             sd.Flags = 0;
 
             IDXGISwapChain1 rawSwapChain1 = null;
-            dxTrace("createSwapChainAndTargets.beforeCreateSwapChainForHwnd");
-            enforceHr(factoryPtr.value.CreateSwapChainForHwnd(
-                queuePtr.value,
-                hwnd,
-                &sd,
-                null,
-                null,
-                &rawSwapChain1),
-                "CreateSwapChainForHwnd failed");
-            dxTrace("createSwapChainAndTargets.afterCreateSwapChainForHwnd");
+            if (transparentWindow) {
+                enforceHr(factoryPtr.value.CreateSwapChainForComposition(
+                    queuePtr.value, &sd, null, &rawSwapChain1),
+                    "CreateSwapChainForComposition failed");
+            } else {
+                enforceHr(factoryPtr.value.CreateSwapChainForHwnd(
+                    queuePtr.value, hwnd, &sd, null, null, &rawSwapChain1),
+                    "CreateSwapChainForHwnd failed");
+            }
 
             IDXGISwapChain3 rawSwapChain3 = null;
             dxTrace("createSwapChainAndTargets.beforeQuerySwapChain3");
@@ -712,6 +716,17 @@ private:
             rawSwapChain1.Release();
             swapChainPtr = new DXPtr!IDXGISwapChain3(rawSwapChain3);
             dxTrace("createSwapChainAndTargets.afterQuerySwapChain3");
+            if (transparentWindow) {
+                enforceHr(DCompositionCreateDevice(null, &compositionDeviceIID,
+                    cast(void**)&compositionDevice), "DCompositionCreateDevice failed");
+                enforceHr(compositionDevice.CreateTargetForHwnd(hwnd, true, &compositionTarget),
+                    "CreateTargetForHwnd failed");
+                enforceHr(compositionDevice.CreateVisual(&compositionVisual), "CreateVisual failed");
+                enforceHr(compositionVisual.SetContent(swapChainPtr.value), "SetContent failed");
+                enforceHr(compositionTarget.SetRoot(compositionVisual), "SetRoot failed");
+                enforceHr(compositionDevice.Commit(), "DirectComposition Commit failed");
+            }
+
 
             enforceHr(factoryPtr.value.MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER),
                 "MakeWindowAssociation failed");
@@ -2317,7 +2332,8 @@ float4 psMain(VSOutput input) : SV_TARGET {
             commandListPtr.value.OMSetRenderTargets(1, &rtv, true, &dsv);
             // Keep destination alpha clear at 0 so ClipToLower/SliceFromLower
             // blend modes can build clipping from actual lower-layer writes.
-            const(float)[4] clearColor = [0.08f, 0.10f, 0.13f, 0.0f];
+            const(float)[4] clearColor = transparentWindow
+                ? [0.0f, 0.0f, 0.0f, 0.0f] : [0.08f, 0.10f, 0.13f, 0.0f];
             commandListPtr.value.ClearRenderTargetView(rtv, clearColor.ptr, 0, null);
             commandListPtr.value.ClearDepthStencilView(dsv, D3D12_CLEAR_FLAGS.STENCIL, 1.0f, 0, 0, null);
         }
@@ -2402,6 +2418,12 @@ float4 psMain(VSOutput input) : SV_TARGET {
             dsvHeapPtr = null;
             offscreenRtvHeapPtr = null;
             rtvHeapPtr = null;
+            if (compositionTarget !is null) compositionTarget.SetRoot(null);
+            if (compositionVisual !is null) compositionVisual.SetContent(null);
+            if (compositionDevice !is null) compositionDevice.Commit();
+            if (compositionVisual !is null) { compositionVisual.Release(); compositionVisual = null; }
+            if (compositionTarget !is null) { compositionTarget.Release(); compositionTarget = null; }
+            if (compositionDevice !is null) { compositionDevice.Release(); compositionDevice = null; }
             swapChainPtr = null;
             if (fenceEvent !is null) {
                 CloseHandle(fenceEvent);
@@ -2931,6 +2953,7 @@ struct DirectXBackendInit {
 }
 
 struct DirectXInitOptions {
+    bool transparentWindow = true;
     void* windowHandle = null;
     HWND hwnd = null;
     int drawableW = 0;
@@ -2967,6 +2990,7 @@ DirectXBackendInit initDirectXBackend(int width, int height, bool isTest, Direct
 
     dxTrace("initDirectXBackend.new RenderingBackend");
     auto backend = new RenderingBackend(window, hwnd);
+    backend.dx.transparentWindow = opts.transparentWindow;
     backend.viewportW = max(1, drawableW);
     backend.viewportH = max(1, drawableH);
     dxTrace("initDirectXBackend.initializeRenderer");

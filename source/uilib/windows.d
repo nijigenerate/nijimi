@@ -30,11 +30,14 @@ version (Windows) {
     enum WindowsTransparencyMode {
         ColorKey,
         Dwm,
+        Composition,
     }
 
     WindowsTransparencyMode windowsTransparencyMode() {
         version (EnableVulkanBackend) {
             return WindowsTransparencyMode.Dwm;
+        } else version (EnableDirectXBackend) {
+            return WindowsTransparencyMode.Composition;
         } else {
             return WindowsTransparencyMode.ColorKey;
         }
@@ -60,6 +63,12 @@ version (Windows) {
         auto props = SDL_GetWindowProperties(window);
         auto hwnd = cast(HWND)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, null);
         if (hwnd !is null) {
+            version (EnableDirectXBackend) {
+                // SDL_WINDOW_TRANSPARENT sets the creation-time composition window flags.
+                debugLog(debugFn, "[transparent] windows: DirectComposition surface");
+                return;
+            }
+
             if (mode == WindowsTransparencyMode.ColorKey) {
                 auto exStyle = cast(LONG_PTR)GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
                 auto nextStyle = exStyle | WS_EX_LAYERED;
