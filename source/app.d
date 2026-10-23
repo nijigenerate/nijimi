@@ -1329,7 +1329,11 @@ void main(string[] args) {
                     cursorInsideWindow = true;
                     cursorLocalX = cast(int)localX;
                     cursorLocalY = cast(int)localY;
-                    gfx.setFinalAlphaProbe(&backendInit, cursorLocalX, cursorLocalY, cursorWindowW, cursorWindowH);
+                    version (EnableDirectXBackend) {
+                        // Dynamic mouse passthrough is disabled on Windows.
+                    } else {
+                        gfx.setFinalAlphaProbe(&backendInit, cursorLocalX, cursorLocalY, cursorWindowW, cursorWindowH);
+                    }
                 }
             }
         }
@@ -1351,7 +1355,11 @@ void main(string[] args) {
             bool onOpaquePixel = false;
             if (cursorInsideWindow) {
                 ubyte alpha = 255;
-                auto sampled = gfx.consumeFinalAlphaSample(&backendInit, alpha);
+                bool sampled = false;
+                version (EnableDirectXBackend) {
+                } else {
+                    sampled = gfx.consumeFinalAlphaSample(&backendInit, alpha);
+                }
                 onOpaquePixel = sampled ? (alpha >= 8) : true;
             }
             bool wantsPassthrough = !onOpaquePixel;

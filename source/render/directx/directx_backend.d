@@ -2789,7 +2789,7 @@ public:
         if (isDxTraceEnabled()) {
             dxTrace("beginDynamicComposite"
                 ~ " texCount=" ~ to!string(pass.textureCount)
-                ~ " scale=(" ~ to!string(pass.scale.x) ~ "," ~ to!string(pass.scale.y) ~ ")"
+                ~ " scale=(" ~ to!string(pass.scale[0]) ~ "," ~ to!string(pass.scale[1]) ~ ")"
                 ~ " rotZ=" ~ to!string(pass.rotationZ)
                 ~ " autoScaled=" ~ to!string(pass.autoScaled)
                 ~ " origViewport=(" ~ to!string(pass.origViewport[0]) ~ ","
@@ -2803,7 +2803,7 @@ public:
         dynamicCompositeDepth++;
         CompositeState st;
         st = defaultCompositeState();
-        st.scale = pass.scale;
+        st.scale = Vec2f(pass.scale[0], pass.scale[1]);
         st.rotationZ = pass.rotationZ;
         st.autoScaled = pass.autoScaled;
         st.origViewport = pass.origViewport;
