@@ -890,6 +890,10 @@ void main(string[] args) {
     } else version (linux) {
         supportsDynamicMousePassthrough = true;
     }
+    version (Windows) {
+        version (EnableVulkanBackend) supportsDynamicMousePassthrough = true;
+        else version (EnableDirectXBackend) supportsDynamicMousePassthrough = true;
+    }
     bool mousePassthroughActive = false;
     if (supportsDynamicMousePassthrough) {
         setWindowMousePassthrough(hostWindow, false, &transparentDebug);
@@ -1151,6 +1155,7 @@ void main(string[] args) {
                             // SDL may recreate native view/layer objects on resize.
                             // Re-apply transparency settings to keep alpha compositing active.
                             configureTransparentWindow(hostWindow, &transparentDebug);
+                            if (mousePassthroughActive) setWindowMousePassthrough(hostWindow, true, &transparentDebug);
                         }
                     }
                     break;
@@ -1332,11 +1337,7 @@ void main(string[] args) {
                     cursorInsideWindow = true;
                     cursorLocalX = cast(int)localX;
                     cursorLocalY = cast(int)localY;
-                    version (EnableDirectXBackend) {
-                        // Dynamic mouse passthrough is disabled on Windows.
-                    } else {
-                        gfx.setFinalAlphaProbe(&backendInit, cursorLocalX, cursorLocalY, cursorWindowW, cursorWindowH);
-                    }
+                    gfx.setFinalAlphaProbe(&backendInit, cursorLocalX, cursorLocalY, cursorWindowW, cursorWindowH);
                 }
             }
         }
@@ -1352,20 +1353,17 @@ void main(string[] args) {
         if (transparencyRetryPending) {
             configureTransparentWindow(hostWindow, &transparentDebug);
             transparencyRetryPending = false;
+            if (mousePassthroughActive) setWindowMousePassthrough(hostWindow, true, &transparentDebug);
         }
 
         if (supportsDynamicMousePassthrough && canApplyTransparentWindow) {
             bool onOpaquePixel = false;
             if (cursorInsideWindow) {
                 ubyte alpha = 255;
-                bool sampled = false;
-                version (EnableDirectXBackend) {
-                } else {
-                    sampled = gfx.consumeFinalAlphaSample(&backendInit, alpha);
-                }
+                auto sampled = gfx.consumeFinalAlphaSample(&backendInit, alpha);
                 onOpaquePixel = sampled ? (alpha >= 8) : true;
             }
-            bool wantsPassthrough = !onOpaquePixel;
+            bool wantsPassthrough = !onOpaquePixel && !dragMoveActive;
             if (wantsPassthrough != mousePassthroughActive) {
                 setWindowMousePassthrough(hostWindow, wantsPassthrough, &transparentDebug);
                 mousePassthroughActive = wantsPassthrough;

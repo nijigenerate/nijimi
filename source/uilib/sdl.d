@@ -51,6 +51,9 @@ void setWindowMousePassthrough(SDL_Window* window, bool enabled, void function(s
         setWindowMousePassthroughOSX(window, enabled, debugFn);
     } else version (linux) {
         setWindowMousePassthroughLinux(window, enabled, debugFn);
+    } else version (Windows) {
+        import uilib.windows : setWindowMousePassthroughWindows = setWindowMousePassthrough;
+        setWindowMousePassthroughWindows(window, enabled, debugFn);
     } else {
         if (debugFn !is null) {
             debugFn("[input-pass] unsupported platform");

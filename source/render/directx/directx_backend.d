@@ -350,6 +350,12 @@ private:
 
         HWND hwnd = null;
         bool transparentWindow = true;
+        DXPtr!ID3D12Resource alphaReadback;
+        bool alphaProbePending;
+        bool alphaSampleValid;
+        int alphaX, alphaY, alphaWindowW, alphaWindowH;
+        ubyte alphaSample;
+
         CompositionDevice compositionDevice;
         CompositionTarget compositionTarget;
         CompositionVisual compositionVisual;
@@ -2338,6 +2344,24 @@ float4 psMain(VSOutput input) : SV_TARGET {
             commandListPtr.value.ClearDepthStencilView(dsv, D3D12_CLEAR_FLAGS.STENCIL, 1.0f, 0, 0, null);
         }
 
+        void ensureAlphaReadback() {
+            if (alphaReadback !is null) return;
+            D3D12_HEAP_PROPERTIES heap = D3D12_HEAP_PROPERTIES.init;
+            heap.Type = D3D12_HEAP_TYPE.READBACK;
+            heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+            D3D12_RESOURCE_DESC desc = D3D12_RESOURCE_DESC.init;
+            desc.Dimension = D3D12_RESOURCE_DIMENSION.BUFFER;
+            desc.Width = 256;
+            desc.Height = desc.DepthOrArraySize = desc.MipLevels = 1;
+            desc.SampleDesc.Count = 1;
+            desc.Layout = D3D12_TEXTURE_LAYOUT.LAYOUT_ROW_MAJOR;
+            ID3D12Resource raw;
+            enforceHr(devicePtr.value.CreateCommittedResource(&heap, D3D12_HEAP_FLAGS.NONE,
+                &desc, D3D12_RESOURCE_STATES.COPY_DEST, null, &IID_ID3D12Resource_Win,
+                cast(void**)&raw), "Create alpha readback failed");
+            alphaReadback = new DXPtr!ID3D12Resource(raw);
+        }
+
         void endFrame(bool doPresent = true) {
             if (!initialized) return;
 
@@ -2347,6 +2371,31 @@ float4 psMain(VSOutput input) : SV_TARGET {
             toPresent.Transition.pResource = renderTargets[frameIndex].value;
             toPresent.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
             toPresent.Transition.StateBefore = D3D12_RESOURCE_STATES.RENDER_TARGET;
+            bool copyAlpha = alphaProbePending && alphaWindowW > 0 && alphaWindowH > 0;
+            alphaProbePending = false;
+            alphaSampleValid = false;
+            if (copyAlpha) {
+                ensureAlphaReadback();
+                toPresent.Transition.StateAfter = D3D12_RESOURCE_STATES.COPY_SOURCE;
+                commandListPtr.value.ResourceBarrier(1, &toPresent);
+                D3D12_TEXTURE_COPY_LOCATION src, dst;
+                src.pResource = renderTargets[frameIndex].value;
+                src.Type = D3D12_TEXTURE_COPY_TYPE.SUBRESOURCE_INDEX;
+                src.SubresourceIndex = 0;
+                dst.pResource = alphaReadback.value;
+                dst.Type = D3D12_TEXTURE_COPY_TYPE.PLACED_FOOTPRINT;
+                dst.PlacedFootprint.Footprint.Format = DXGI_FORMAT.R8G8B8A8_UNORM;
+                dst.PlacedFootprint.Footprint.Width = 1;
+                dst.PlacedFootprint.Footprint.Height = 1;
+                dst.PlacedFootprint.Footprint.Depth = 1;
+                dst.PlacedFootprint.Footprint.RowPitch = 256;
+                import std.algorithm : clamp;
+                auto x = cast(uint)clamp(cast(long)alphaX * viewportW / alphaWindowW, 0L, cast(long)viewportW - 1);
+                auto y = cast(uint)clamp(cast(long)alphaY * viewportH / alphaWindowH, 0L, cast(long)viewportH - 1);
+                D3D12_BOX box = D3D12_BOX(x, y, 0, x + 1, y + 1, 1);
+                commandListPtr.value.CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
+                toPresent.Transition.StateBefore = D3D12_RESOURCE_STATES.COPY_SOURCE;
+            }
             toPresent.Transition.StateAfter = D3D12_RESOURCE_STATES.PRESENT;
             commandListPtr.value.ResourceBarrier(1, &toPresent);
 
@@ -2370,6 +2419,15 @@ float4 psMain(VSOutput input) : SV_TARGET {
                 recoverFromDeviceLoss(DXGI_ERROR_DEVICE_REMOVED_HR);
                 return;
             }
+            if (copyAlpha) {
+                void* mapped;
+                D3D12_RANGE readRange = D3D12_RANGE(0, 4);
+                enforceHr(alphaReadback.value.Map(0, &readRange, &mapped), "Map alpha readback failed");
+                alphaSample = (cast(const(ubyte)*)mapped)[3];
+                alphaSampleValid = true;
+                D3D12_RANGE written = D3D12_RANGE(0, 0);
+                alphaReadback.value.Unmap(0, &written);
+            }
         }
 
         void shutdown(bool waitForIdle = true) {
@@ -2383,6 +2441,8 @@ float4 psMain(VSOutput input) : SV_TARGET {
                     renderTargets[i] = null;
                 }
             }
+            releaseDxResource(alphaReadback);
+            alphaProbePending = alphaSampleValid = false;
             vertexUploadBuffer = null;
             indexUploadBuffer = null;
             vertexUploadCapacity = 0;
@@ -3028,6 +3088,27 @@ DirectXBackendInit initDirectXBackend(int width, int height, bool isTest, Direct
 DirectXBackendInit initDirectXBackend(int width, int height, bool isTest) {
     enforce(false, "Use initDirectXBackend(..., DirectXInitOptions) with host-managed HWND");
     return DirectXBackendInit(null, null, null, width, height, UnityResourceCallbacks.init);
+}
+
+void setFinalAlphaProbe(const DirectXBackendInit* dx, int x, int y, int windowW, int windowH) {
+    if (dx is null || dx.backend is null) return;
+    auto backend = cast(RenderingBackend)dx.backend;
+    backend.dx.alphaX = x;
+    backend.dx.alphaY = y;
+    backend.dx.alphaWindowW = windowW;
+    backend.dx.alphaWindowH = windowH;
+    backend.dx.alphaSampleValid = false;
+    backend.dx.alphaProbePending = windowW > 0 && windowH > 0;
+}
+
+bool consumeFinalAlphaSample(const DirectXBackendInit* dx, out ubyte alpha) {
+    alpha = 255;
+    if (dx is null || dx.backend is null) return false;
+    auto backend = cast(RenderingBackend)dx.backend;
+    if (!backend.dx.alphaSampleValid) return false;
+    alpha = backend.dx.alphaSample;
+    backend.dx.alphaSampleValid = false;
+    return true;
 }
 
 void renderCommands(const DirectXBackendInit* dx,

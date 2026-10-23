@@ -49,6 +49,21 @@ version (Windows) {
         }
     }
 
+    void setWindowMousePassthrough(SDL_Window* window, bool enabled, void function(string) debugFn = null) {
+        // OpenGL uses native color-key hit testing; do not alter its layered attributes.
+        if (window is null || windowsTransparencyMode() == WindowsTransparencyMode.ColorKey) return;
+        import core.sys.windows.windows : HWND, LONG_PTR, GWL_EXSTYLE,
+            WS_EX_TRANSPARENT, WS_EX_LAYERED, LWA_ALPHA,
+            GetWindowLongPtrW, SetWindowLongPtrW, SetLayeredWindowAttributes;
+        auto props = SDL_GetWindowProperties(window);
+        auto hwnd = cast(HWND)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, null);
+        if (hwnd is null) return;
+        auto style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        auto flags = cast(LONG_PTR)(WS_EX_TRANSPARENT | WS_EX_LAYERED);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, enabled ? style | flags : style & ~flags);
+        if (enabled) SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+    }
+
     void configureTransparentWindow(SDL_Window* window, void function(string) debugFn = null) {
         if (window is null) {
             debugLog(debugFn, "[transparent] skipped: window is null");
